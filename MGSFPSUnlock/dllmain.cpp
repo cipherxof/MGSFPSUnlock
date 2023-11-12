@@ -9,6 +9,7 @@ int GameVersion = 0;
 int TimeBase = 5;
 int ConfigTargetFramerate = 60;
 int* GV_TimeBase = NULL;
+float* GV_Unknown = NULL; // animation blending value?
 float* CameraSpeedModifier = NULL;
 int* pInCutscene = NULL;
 double* ActorWaitValue = NULL;
@@ -62,6 +63,7 @@ void InstallHooks()
     uintptr_t updateMotionAOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 85 C9 74 31 0F 57 C0 0F 2F C1 76 0B 66 0F 6E");
     uintptr_t updateMotionBOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 85 C9 74 3F 0F 57 C0 0F 2F C1 76 0B 66 0F 6E");
 
+    //48 83 EC 38 0F 29 74 24  20 0F 28 F0 E8 6F E7 FD
     Memory::DetourFunction(getTimeBaseOffset, (LPVOID)GetTimeBaseHook, (LPVOID*)&GetTimeBase);
     Memory::DetourFunction(updateMotionAOffset, (LPVOID)UpdateMotionTimeBaseAHook, (LPVOID*)&UpdateMotionTimeBaseA);
     Memory::DetourFunction(updateMotionBOffset, (LPVOID)UpdateMotionTimeBaseBHook, (LPVOID*)&UpdateMotionTimeBaseB);
@@ -76,6 +78,7 @@ bool Initialize()
         return false;
     case 0x00010002:
         GV_TimeBase = (int*)(GameBase + 0x1D8D8B0);
+        GV_Unknown = (float*)(GameBase + 0x8F195C);
         ActorWaitValue = (double*)(GameBase + 0x8EBF40);
         pInCutscene = (int*)(GameBase + 0x1E41570);
         CameraSpeedModifier = (float*)(GameBase + 0x8EC2C4);
@@ -90,11 +93,13 @@ bool Initialize()
     DWORD oldProtect;
     VirtualProtect(ActorWaitValue, 8, PAGE_READWRITE, &oldProtect);
     VirtualProtect(CameraSpeedModifier, 4, PAGE_READWRITE, &oldProtect);
+    VirtualProtect(GV_Unknown, 4, PAGE_READWRITE, &oldProtect);
 
     float value = (float)ConfigTargetFramerate / 60.0f;
     TimeBase = std::round(5.0f / value - 0.1);
     *CameraSpeedModifier = 30.0f / value;
     *GV_TimeBase = TimeBase;
+    *GV_Unknown = *GV_Unknown * value;
     *ActorWaitValue = 1.0 / (double)ConfigTargetFramerate;
 
     return true;
