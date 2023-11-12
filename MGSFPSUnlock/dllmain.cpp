@@ -16,13 +16,23 @@ double* ActorWaitValue = NULL;
 
 mINI::INIStructure Config;
 
+typedef uint64_t __fastcall GetTimeBaseDelegate(struct _exception* a1);
+typedef void __fastcall UpdateMotionTimeBaseADelegate(uint64_t a1, float a2, int a3);
+typedef void __fastcall UpdateMotionTimeBaseBDelegate(uint64_t a1, float a2);
+typedef __int64 __fastcall GetTargetFpsDelegate(struct _exception* a1);
+typedef __int64 __fastcall ThrowItemDelegate(uint64_t a1, int* a2, float* a3, int a4, uint16_t a5, int a6, int a7, int a8, struct _exception* a9, int a10);
+
+GetTimeBaseDelegate* GetTimeBase;
+UpdateMotionTimeBaseADelegate* UpdateMotionTimeBaseA;
+UpdateMotionTimeBaseBDelegate* UpdateMotionTimeBaseB;
+GetTargetFpsDelegate* GetTargetFps;
+ThrowItemDelegate* ThrowItem;
+
 bool InCutscene() // todo: find a more accurate method
 {
     return pInCutscene == NULL ? false : *pInCutscene == 0;
 }
 
-typedef uint64_t __fastcall GetTimeBaseDelegate(struct _exception* a1);
-GetTimeBaseDelegate* GetTimeBase;
 uint64_t __fastcall GetTimeBaseHook(struct _exception* a1)
 {
     if (InCutscene())
@@ -41,18 +51,26 @@ float CalculateMotionTimeBase(float value)
     return value / ((float)ConfigTargetFramerate / 60.0f);
 }
 
-typedef void __fastcall UpdateMotionTimeBaseADelegate(__int64 a1, float a2, int a3);
-UpdateMotionTimeBaseADelegate* UpdateMotionTimeBaseA;
-void __fastcall UpdateMotionTimeBaseAHook(__int64 a1, float a2, int a3)
+void __fastcall UpdateMotionTimeBaseAHook(uint64_t a1, float a2, int a3)
 {
     UpdateMotionTimeBaseA(a1, CalculateMotionTimeBase(a2), a3);
 }
 
-typedef void __fastcall UpdateMotionTimeBaseBDelegate(__int64 a1, float a2);
-UpdateMotionTimeBaseBDelegate* UpdateMotionTimeBaseB;
-void __fastcall UpdateMotionTimeBaseBHook(__int64 a1, float a2)
+void __fastcall UpdateMotionTimeBaseBHook(uint64_t a1, float a2)
 {
     UpdateMotionTimeBaseB(a1, CalculateMotionTimeBase(a2));
+}
+
+__int64 __fastcall GetTargetFpsHook(struct _exception* a1)
+{
+    return ConfigTargetFramerate;
+}
+
+__int64 __fastcall ThrowItemHook(uint64_t a1, int* a2, float* a3, int a4, uint16_t a5, int a6, int a7, int a8, struct _exception* a9, int a10)
+{
+    *(float*)&a6 = *(float*)&a6 / ((float)ConfigTargetFramerate / 60.0f);
+
+    return ThrowItem(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
 }
 
 void InstallHooks() 
@@ -62,11 +80,14 @@ void InstallHooks()
     uintptr_t getTimeBaseOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 83 EC 28 E8 97 E6 FD FF 33 C9 83 F8 01 0F 94");
     uintptr_t updateMotionAOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 85 C9 74 31 0F 57 C0 0F 2F C1 76 0B 66 0F 6E");
     uintptr_t updateMotionBOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 85 C9 74 3F 0F 57 C0 0F 2F C1 76 0B 66 0F 6E");
+    uintptr_t getTargetFpsOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 83 EC 28 E8 77 E6 FD FF 83 F8 01 B9 3C 00 00");
+    uintptr_t throwItemOffset = (uintptr_t)Memory::PatternScan(GameModule, "40 55 56 57 41 56 41 57 48 8D 6C 24 E0 48 81 EC");
 
-    //48 83 EC 38 0F 29 74 24  20 0F 28 F0 E8 6F E7 FD
     Memory::DetourFunction(getTimeBaseOffset, (LPVOID)GetTimeBaseHook, (LPVOID*)&GetTimeBase);
     Memory::DetourFunction(updateMotionAOffset, (LPVOID)UpdateMotionTimeBaseAHook, (LPVOID*)&UpdateMotionTimeBaseA);
     Memory::DetourFunction(updateMotionBOffset, (LPVOID)UpdateMotionTimeBaseBHook, (LPVOID*)&UpdateMotionTimeBaseB);
+    Memory::DetourFunction(getTargetFpsOffset, (LPVOID)UpdateMotionTimeBaseBHook, (LPVOID*)&UpdateMotionTimeBaseB);
+    Memory::DetourFunction(throwItemOffset, (LPVOID)ThrowItemHook, (LPVOID*)&ThrowItem);
 }
 
 bool Initialize()
@@ -119,7 +140,7 @@ DWORD WINAPI MainThread(LPVOID lpParam)
     if (GameVersion == 0)
         return false;
 
-    Sleep(3000); // delay, just in case
+    //Sleep(3000); // delay, just in case
     ReadConfig();
     if (!Initialize())
         return false;
