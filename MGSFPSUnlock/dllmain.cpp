@@ -95,13 +95,14 @@ void InstallHooks()
     uintptr_t updateMotionBOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 85 C9 74 3F 0F 57 C0 0F 2F C1 76 0B 66 0F 6E");
     uintptr_t getTargetFpsOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 83 EC 28 E8 77 E6 FD FF 83 F8 01 B9 3C 00 00");
     uintptr_t throwItemOffset = (uintptr_t)Memory::PatternScan(GameModule, "40 55 56 57 41 56 41 57 48 8D 6C 24 E0 48 81 EC");
+    uintptr_t animBlendOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 89 5C 24 08 57 48 83  EC 30 0F 29 74 24 20 0F");
 
     Memory::DetourFunction(getTimeBaseOffset, (LPVOID)GetTimeBaseHook, (LPVOID*)&GetTimeBase);
     Memory::DetourFunction(updateMotionAOffset, (LPVOID)UpdateMotionTimeBaseAHook, (LPVOID*)&UpdateMotionTimeBaseA);
     Memory::DetourFunction(updateMotionBOffset, (LPVOID)UpdateMotionTimeBaseBHook, (LPVOID*)&UpdateMotionTimeBaseB);
     Memory::DetourFunction(getTargetFpsOffset, (LPVOID)GetTargetFpsHook, (LPVOID*)&GetTargetFps);
     Memory::DetourFunction(throwItemOffset, (LPVOID)ThrowItemHook, (LPVOID*)&ThrowItem);
-    Memory::DetourFunction(GameBase + 0x94CD0, (LPVOID)UpdateAnimationBlendingHook, (LPVOID*)&UpdateAnimationBlending);
+    Memory::DetourFunction(animBlendOffset, (LPVOID)UpdateAnimationBlendingHook, (LPVOID*)&UpdateAnimationBlending);
 }
 
 bool Initialize()
