@@ -5,32 +5,32 @@
 
 HMODULE GameModule = GetModuleHandleA("METAL GEAR SOLID3.exe");
 uintptr_t GameBase = (uintptr_t)GameModule;
+mINI::INIStructure Config;
 int GameVersion = 0;
 int TimeBase = 5;
 int ConfigTargetFramerate = 60;
+float FrameRateModifier = 1.0f;
 int* GV_TimeBase = NULL;
-float* GV_Unknown = NULL; // animation blending value?
-float* CameraSpeedModifier = NULL;
-int* pInCutscene = NULL;
+int* CutsceneFlag = NULL;
 double* ActorWaitValue = NULL;
-
-mINI::INIStructure Config;
 
 typedef uint64_t __fastcall GetTimeBaseDelegate(struct _exception* a1);
 typedef void __fastcall UpdateMotionTimeBaseADelegate(uint64_t a1, float a2, int a3);
 typedef void __fastcall UpdateMotionTimeBaseBDelegate(uint64_t a1, float a2);
-typedef __int64 __fastcall GetTargetFpsDelegate(struct _exception* a1);
-typedef __int64 __fastcall ThrowItemDelegate(uint64_t a1, int* a2, float* a3, int a4, uint16_t a5, int a6, int a7, int a8, struct _exception* a9, int a10);
+typedef int64_t __fastcall GetTargetFpsDelegate(struct _exception* a1);
+typedef int64_t __fastcall ThrowItemDelegate(uint64_t a1, int* a2, float* a3, int a4, uint16_t a5, int a6, int a7, int a8, struct _exception* a9, int a10);
+typedef int16_t __fastcall UpdateAnimationBlendingDelegate(struct _exception* a1, int16_t a2);
 
 GetTimeBaseDelegate* GetTimeBase;
 UpdateMotionTimeBaseADelegate* UpdateMotionTimeBaseA;
 UpdateMotionTimeBaseBDelegate* UpdateMotionTimeBaseB;
 GetTargetFpsDelegate* GetTargetFps;
 ThrowItemDelegate* ThrowItem;
+UpdateAnimationBlendingDelegate* UpdateAnimationBlending;
 
 bool InCutscene() // todo: find a more accurate method
 {
-    return pInCutscene == NULL ? false : *pInCutscene == 0;
+    return CutsceneFlag == NULL ? false : *CutsceneFlag == 0;
 }
 
 uint64_t __fastcall GetTimeBaseHook(struct _exception* a1)
@@ -48,7 +48,7 @@ float CalculateMotionTimeBase(float value)
 
     value = value * (5.0f / (float)*GV_TimeBase);
 
-    return value / ((float)ConfigTargetFramerate / 60.0f);
+    return value / FrameRateModifier;
 }
 
 void __fastcall UpdateMotionTimeBaseAHook(uint64_t a1, float a2, int a3)
@@ -61,16 +61,29 @@ void __fastcall UpdateMotionTimeBaseBHook(uint64_t a1, float a2)
     UpdateMotionTimeBaseB(a1, CalculateMotionTimeBase(a2));
 }
 
-__int64 __fastcall GetTargetFpsHook(struct _exception* a1)
+int64_t __fastcall GetTargetFpsHook(struct _exception* a1)
 {
     return ConfigTargetFramerate;
 }
 
-__int64 __fastcall ThrowItemHook(uint64_t a1, int* a2, float* a3, int a4, uint16_t a5, int a6, int a7, int a8, struct _exception* a9, int a10)
+int64_t __fastcall ThrowItemHook(uint64_t a1, int* a2, float* a3, int a4, uint16_t a5, int a6, int a7, int a8, struct _exception* a9, int a10)
 {
-    *(float*)&a6 = *(float*)&a6 / ((float)ConfigTargetFramerate / 60.0f);
+    *(float*)&a6 = *(float*)&a6 / FrameRateModifier;
 
     return ThrowItem(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+}
+
+int16_t UpdateAnimationBlendingHook(int16_t currentFrame, int16_t targetFrame)
+{
+    const float smoothingFactor = 8.0f * FrameRateModifier;
+
+    int16_t diff = targetFrame - currentFrame;
+    int16_t value = (float)(diff) / smoothingFactor;
+
+    if (*GV_TimeBase != GetTimeBase(NULL))
+        currentFrame = (value != 0) ? (currentFrame + value) : targetFrame;
+
+    return (value != 0) ? (currentFrame + value) : targetFrame;
 }
 
 void InstallHooks() 
@@ -86,12 +99,20 @@ void InstallHooks()
     Memory::DetourFunction(getTimeBaseOffset, (LPVOID)GetTimeBaseHook, (LPVOID*)&GetTimeBase);
     Memory::DetourFunction(updateMotionAOffset, (LPVOID)UpdateMotionTimeBaseAHook, (LPVOID*)&UpdateMotionTimeBaseA);
     Memory::DetourFunction(updateMotionBOffset, (LPVOID)UpdateMotionTimeBaseBHook, (LPVOID*)&UpdateMotionTimeBaseB);
-    Memory::DetourFunction(getTargetFpsOffset, (LPVOID)UpdateMotionTimeBaseBHook, (LPVOID*)&UpdateMotionTimeBaseB);
+    Memory::DetourFunction(getTargetFpsOffset, (LPVOID)GetTargetFpsHook, (LPVOID*)&GetTargetFps);
     Memory::DetourFunction(throwItemOffset, (LPVOID)ThrowItemHook, (LPVOID*)&ThrowItem);
+    Memory::DetourFunction(GameBase + 0x94CD0, (LPVOID)UpdateAnimationBlendingHook, (LPVOID*)&UpdateAnimationBlending);
 }
 
 bool Initialize()
 {
+    if (ConfigTargetFramerate <= 0)
+        return false;
+
+    float* cameraSpeedModifierA = NULL;
+    float* cameraSpeedModifierB = NULL;
+    float* realTimeRate = NULL;
+
     switch (GameVersion)
     {
     case 0x00010000:
@@ -99,29 +120,29 @@ bool Initialize()
         return false;
     case 0x00010002:
         GV_TimeBase = (int*)(GameBase + 0x1D8D8B0);
-        GV_Unknown = (float*)(GameBase + 0x8F195C);
         ActorWaitValue = (double*)(GameBase + 0x8EBF40);
-        pInCutscene = (int*)(GameBase + 0x1E41570);
-        CameraSpeedModifier = (float*)(GameBase + 0x8EC2C4);
+        CutsceneFlag = (int*)(GameBase + 0x1E41570);
+        cameraSpeedModifierA = (float*)(GameBase + 0x8EC2C4);
+        cameraSpeedModifierB = (float*)(GameBase + 0x910BCC);
+        realTimeRate = (float*)(GameBase + 0x8F18E0);
         break;
     default:
         return false;
     }
 
-    if (ConfigTargetFramerate <= 0)
-        return false;
-
     DWORD oldProtect;
     VirtualProtect(ActorWaitValue, 8, PAGE_READWRITE, &oldProtect);
-    VirtualProtect(CameraSpeedModifier, 4, PAGE_READWRITE, &oldProtect);
-    VirtualProtect(GV_Unknown, 4, PAGE_READWRITE, &oldProtect);
+    VirtualProtect(cameraSpeedModifierA, 4, PAGE_READWRITE, &oldProtect);
+    VirtualProtect(cameraSpeedModifierB, 4, PAGE_READWRITE, &oldProtect);
+    VirtualProtect(realTimeRate, 4, PAGE_READWRITE, &oldProtect);
 
-    float value = (float)ConfigTargetFramerate / 60.0f;
-    TimeBase = std::round(5.0f / value - 0.1);
-    *CameraSpeedModifier = 30.0f / value;
+    FrameRateModifier = (float)ConfigTargetFramerate / 60.0f;
+    TimeBase = std::round(5.0f / FrameRateModifier - 0.1);
     *GV_TimeBase = TimeBase;
-    *GV_Unknown = *GV_Unknown * value;
     *ActorWaitValue = 1.0 / (double)ConfigTargetFramerate;
+    *cameraSpeedModifierA = *cameraSpeedModifierA / FrameRateModifier;
+    *cameraSpeedModifierB = *cameraSpeedModifierB / FrameRateModifier;
+    *realTimeRate = *realTimeRate / FrameRateModifier;
 
     return true;
 }
@@ -140,7 +161,6 @@ DWORD WINAPI MainThread(LPVOID lpParam)
     if (GameVersion == 0)
         return false;
 
-    //Sleep(3000); // delay, just in case
     ReadConfig();
     if (!Initialize())
         return false;
@@ -161,7 +181,7 @@ DWORD WINAPI MainThread(LPVOID lpParam)
                 *ActorWaitValue = 1.0 / (double)ConfigTargetFramerate;
             }
         }
-        Sleep(16);
+        Sleep(1);
     }
     return true;
 }
