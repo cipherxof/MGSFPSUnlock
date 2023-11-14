@@ -127,6 +127,14 @@ bool Initialize()
         cameraSpeedModifierB = (float*)(GameBase + 0x910BCC);
         realTimeRate = (float*)(GameBase + 0x8F18E0);
         break;
+    case 0x00010003:
+        GV_TimeBase = (int*)(GameBase + 0x1D8E8A0);
+        ActorWaitValue = (double*)(GameBase + 0x8EBF48);
+        CutsceneFlag = (int*)(GameBase + 0x1E42570);
+        cameraSpeedModifierA = (float*)(GameBase + 0x8EC2CC);
+        cameraSpeedModifierB = (float*)(GameBase + 0x910F80);
+        realTimeRate = (float*)(GameBase + 0x8F18E0);
+        break;
     default:
         return false;
     }
