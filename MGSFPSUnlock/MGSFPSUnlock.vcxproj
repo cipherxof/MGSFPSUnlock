@@ -73,9 +73,12 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <TargetExt>.asi</TargetExt>
+    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);$(VC_IncludePath)\includes;</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <TargetExt>.asi</TargetExt>
+    <IncludePath>$(ProjectDir)\includes;</IncludePath>
+    <OutDir>F:\SteamLibrary\steamapps\common\MGS2</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -152,14 +155,20 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="ini.h" />
-    <ClInclude Include="Memory.h" />
-    <ClInclude Include="MinHook.h" />
-    <ClInclude Include="Utils.h" />
+    <ClInclude Include="includes\config.h" />
+    <ClInclude Include="includes\ini.h" />
+    <ClInclude Include="includes\Memory.h" />
+    <ClInclude Include="includes\MinHook.h" />
+    <ClInclude Include="includes\Utils.h" />
+    <ClInclude Include="MGS2\mgs2.h" />
+    <ClInclude Include="MGS3\mgs3.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="Memory.cpp" />
+    <ClCompile Include="MGS2\mgs2.cpp" />
+    <ClCompile Include="MGS3\mgs3.cpp" />
+    <ClCompile Include="Utils.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
