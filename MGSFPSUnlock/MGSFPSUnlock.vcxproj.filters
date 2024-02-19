@@ -1,0 +1,24 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="Memory.cpp" />
+    <ClCompile Include="MGS3\game.cpp">
+      <Filter>MGS3</Filter>
+    </ClCompile>
+    <ClCompile Include="Utils.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="includes\ini.h" />
+    <ClInclude Include="includes\Memory.h" />
+    <ClInclude Include="includes\MinHook.h" />
+    <ClInclude Include="includes\Utils.h" />
+    <ClInclude Include="MGS3\mgs3.h" />
+    <ClInclude Include="includes\config.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="MGS3">
+      <UniqueIdentifier>{41837e79-f57f-43c6-8364-62de24213c0e}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

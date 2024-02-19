@@ -1,6 +1,22 @@
-#include <shlwapi.h>
+#include "Utils.h"
 
-DWORD GetGameVersion(HMODULE gameModule)
+void GetGameType(HMODULE gameModule, GameType& result)
+{
+    WCHAR exePath[_MAX_PATH] = { 0 };
+    GetModuleFileName(gameModule, exePath, MAX_PATH);
+    WCHAR* filename = PathFindFileName(exePath);
+
+    printf("%ls\n", filename);
+
+    if (wcscmp(filename, L"METAL GEAR SOLID2.exe") == 0)
+        result = GameType::MGS2;
+    else if (wcscmp(filename, L"METAL GEAR SOLID3.exe") == 0)
+        result = GameType::MGS3;
+    else 
+        result = GameType::Unknown;
+}
+
+uint64_t GetGameVersion(HMODULE gameModule)
 {
     WCHAR exePath[_MAX_PATH] = { 0 };
     GetModuleFileName(gameModule, exePath, MAX_PATH);
@@ -29,11 +45,16 @@ DWORD GetGameVersion(HMODULE gameModule)
                     VS_FIXEDFILEINFO* verInfo = (VS_FIXEDFILEINFO*)lpBuffer;
                     if (verInfo->dwSignature == 0xfeef04bd)
                     {
-                        return verInfo->dwFileVersionMS;
+                        ULARGE_INTEGER version;
+                        version.LowPart = verInfo->dwFileVersionLS;
+                        version.HighPart = verInfo->dwFileVersionMS;
+
+                        return version.QuadPart;
                     }
                 }
             }
         }
+
         delete[] verData;
     }
 
