@@ -65,36 +65,37 @@ __int64 __fastcall MGS2_GetTimeBaseHook(struct _exception* a1)
 
 bool MGS2_InitializeOffsets()
 {
+    spdlog::info("MGS2: MGS2_InitializeOffsets() started.");
     MGS2_ActorWaitValue = (double*)(Memory::PatternScan(GameModule, "42 50 5F 4D 45 4D 4A 50 45 47") + 0x18);
 
     switch (Config.gameVersion) {
         case 0x1000200000000:
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xAADA64); //done
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16CE4B8); //done
+            MGS2_CutsceneFlag = (int*)(GameBase + 0xAADA64);
+            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16CE4B8);
             break;
         case 0x1000300000000:
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xAADA64); //done
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16CE4B8); //done
+            MGS2_CutsceneFlag = (int*)(GameBase + 0xAADA64);
+            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16CE4B8);
             break;
         case 0x1000400000000:
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xAB4C74); //done
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16D5638); //done
+            MGS2_CutsceneFlag = (int*)(GameBase + 0xAB4C74);
+            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16D5638);
             break;
         case 0x1000400010000:
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xAB4C74); //done
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16D5638); //done
+            MGS2_CutsceneFlag = (int*)(GameBase + 0xAB4C74);
+            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16D5638);
             break;
         case 0x1000500010000:
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xA8CD74); //done
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16AD878); //done
+            MGS2_CutsceneFlag = (int*)(GameBase + 0xA8CD74);
+            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16AD878);
             break;
         case 0x2000000000000:
             MGS2_CutsceneFlag = (int*)(GameBase + 0xAA8F84);
             MGS2_RealtimeCutscene = (int*)(GameBase + 0x16CA5D8);
             break;
         case 0x2000000010000: 
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xAA9F94); //done
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16CB5D8); //done
+            MGS2_CutsceneFlag = (int*)(GameBase + 0xAA9F94);
+            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16CB5D8);
             break;
         default:
             spdlog::error("MGS2: Unsupported game version!");
@@ -108,27 +109,30 @@ bool MGS2_InitializeOffsets()
 
     DWORD oldProtect;
     VirtualProtect(MGS2_ActorWaitValue, 8, PAGE_READWRITE, &oldProtect);
-
+    spdlog::info("MGS2: MGS2_InitializeOffsets() finished.");
     return true;
 }
 
 void MGS2_InstallHooks()
 {
     int status = MH_Initialize();
+    spdlog::info("MGS2: MGS2_InstallHooks() started.");
 
     uintptr_t actDashFireOffset = (uintptr_t)Memory::PatternScan(GameModule, "?? ?? ?? ?? ?? 49 8D AB 68 FE FF FF 48 81 EC 88");
     uintptr_t createDebrisTexOffset = (uintptr_t)Memory::PatternScan(GameModule, "40 55 53 56 57 41 54 41 56 41 57 48 8D AC 24 00");
     uintptr_t getTimeBaseOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 83 EC 28 E8 ?? ?? ?? ?? 33 C9 83 F8 01 0F 94");
     
     //logging
-    actDashFireOffset ? spdlog::info("MGS2: InstallHooks() - actDashFireOffset() found: Offset is {:x}", (uintptr_t)actDashFireOffset - (uintptr_t)GameModule) : spdlog::error("MGS2: InstallHooks() failed to find actDashFireOffset");
-    createDebrisTexOffset ? spdlog::info("MGS2: InstallHooks() - createDebrisTexOffset() found: Offset is {:x}", (uintptr_t)createDebrisTexOffset - (uintptr_t)GameModule) : spdlog::error("MGS2: InstallHooks() failed to find createDebrisTexOffset");
-    getTimeBaseOffset ? spdlog::info("MGS2: InstallHooks() - getTimeBaseOffset() found: Offset is {:x}", (uintptr_t)getTimeBaseOffset - (uintptr_t)GameModule) : spdlog::error("MGS2: InstallHooks() failed to find getTimeBaseOffset");
+    actDashFireOffset ? spdlog::info("MGS2: MGS2_InstallHooks() - actDashFireOffset() found: Offset is {:x}", (uintptr_t)actDashFireOffset - (uintptr_t)GameModule) : spdlog::error("MGS2: MGS2_InstallHooks() failed to find actDashFireOffset");
+    createDebrisTexOffset ? spdlog::info("MGS2: MGS2_InstallHooks() - createDebrisTexOffset() found: Offset is {:x}", (uintptr_t)createDebrisTexOffset - (uintptr_t)GameModule) : spdlog::error("MGS2: MGS2_InstallHooks() failed to find createDebrisTexOffset");
+    getTimeBaseOffset ? spdlog::info("MGS2: MGS2_InstallHooks() - getTimeBaseOffset() found: Offset is {:x}", (uintptr_t)getTimeBaseOffset - (uintptr_t)GameModule) : spdlog::error("MGS2: MGS2_InstallHooks() failed to find getTimeBaseOffset");
 
 
     Memory::DetourFunction(actDashFireOffset, (LPVOID)MGS2_ActDashFireHook, (LPVOID*)&MGS2_ActDashFire);
     Memory::DetourFunction(createDebrisTexOffset, (LPVOID)MGS2_CreateDebrisTexHook, (LPVOID*)&MGS2_CreateDebrisTex);
     Memory::DetourFunction(getTimeBaseOffset, (LPVOID)MGS2_GetTimeBaseHook, (LPVOID*)&MGS2_GetTimeBase);
+
+    spdlog::info("MGS2: MGS2_InstallHooks() finished.");
 }
 
 void MGS2_Init()

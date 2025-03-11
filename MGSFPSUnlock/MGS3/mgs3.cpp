@@ -90,6 +90,8 @@ int16_t UpdateAnimationBlendingHook(int16_t currentFrame, int16_t targetFrame)
 
 bool MGS3_InitializeOffsets()
 {
+    spdlog::info("MGS3: MGS3_InitializeOffsets() started.");
+
     float* cameraSpeedModifierA = NULL;
     float* cameraSpeedModifierB = NULL;
     float* realTimeRate = NULL;
@@ -129,20 +131,20 @@ bool MGS3_InitializeOffsets()
         realTimeRate = (float*)(GameBase + 0x8F90E0);
         break;
     case 0x1000500010000:
-        GV_TimeBase = (int*)(GameBase + 0x1D97D10);
-        ActorWaitValue = (double*)(GameBase + 0x8F2DF8);
-        CutsceneFlag = (int*)(GameBase + 0x1E4BA50);
-        cameraSpeedModifierA = (float*)(GameBase + 0x8F24C4);
-        cameraSpeedModifierB = (float*)(GameBase + 0x9186E0);
-        realTimeRate = (float*)(GameBase + 0x8F90E0);
+        GV_TimeBase = (int*)(GameBase + 0x1D49090);
+        ActorWaitValue = (double*)(GameBase + 0x8A09A8);
+        CutsceneFlag = (int*)(GameBase + 0x1DFCE90);
+        cameraSpeedModifierA = (float*)(GameBase + 0x8A0074);
+        cameraSpeedModifierB = (float*)(GameBase + 0x8C8AD0);
+        realTimeRate = (float*)(GameBase + 0x8A91F0);
         break;
     case 0x2000000000000:
-        GV_TimeBase = (int*)(GameBase + 0x1D97D10);
-        ActorWaitValue = (double*)(GameBase + 0x8F2DF8);
-        CutsceneFlag = (int*)(GameBase + 0x1E4BA50);
-        cameraSpeedModifierA = (float*)(GameBase + 0x8F24C4);
-        cameraSpeedModifierB = (float*)(GameBase + 0x9186E0);
-        realTimeRate = (float*)(GameBase + 0x8F90E0);
+        GV_TimeBase = (int*)(GameBase + 0x1D77740);
+        ActorWaitValue = (double*)(GameBase + 0x8B7C08);
+        CutsceneFlag = (int*)(GameBase + 0x1E2B510);
+        cameraSpeedModifierA = (float*)(GameBase + 0x8B71C0);
+        cameraSpeedModifierB = (float*)(GameBase + 0x8F041C);
+        realTimeRate = (float*)(GameBase + 0x8D0F70);
         break;
     case 0x2000000010000:  //done
         GV_TimeBase = (int*)(GameBase + 0x1D77740);
@@ -178,13 +180,15 @@ bool MGS3_InitializeOffsets()
     *cameraSpeedModifierA = *cameraSpeedModifierA / FrameRateModifier;
     *cameraSpeedModifierB = *cameraSpeedModifierB / FrameRateModifier;
     *realTimeRate = *realTimeRate / FrameRateModifier;
-
+    
+    spdlog::info("MGS3: MGS3_InitializeOffsets() finished.");
     return true;
 }
 
 void MGS3_InstallHooks()
 {
     int status = MH_Initialize();
+    spdlog::info("MGS3: MGS3_InstallHooks() started.");
 
     uintptr_t getTimeBaseOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 83 EC 28 E8 ?? ?? FD FF 33 C9 83 F8 01 0F 94");
     uintptr_t updateMotionAOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 85 C9 74 31 0F 57 C0 0F 2F C1 76 0B 66 0F 6E");
@@ -207,6 +211,8 @@ void MGS3_InstallHooks()
     Memory::DetourFunction(getTargetFpsOffset, (LPVOID)GetTargetFpsHook, (LPVOID*)&GetTargetFps);
     Memory::DetourFunction(throwItemOffset, (LPVOID)ThrowItemHook, (LPVOID*)&ThrowItem);
     Memory::DetourFunction(animBlendOffset, (LPVOID)UpdateAnimationBlendingHook, (LPVOID*)&UpdateAnimationBlending);
+    
+    spdlog::info("MGS3: MGS3_InstallHooks() finished.");
 }
 
 void MGS3_Init()
@@ -216,8 +222,6 @@ void MGS3_Init()
 
     MGS3_InstallHooks();
     
-    spdlog::info("MGS3: Intiailization successful!");
-
     while (true)
     {
         if (ActorWaitValue != NULL)
