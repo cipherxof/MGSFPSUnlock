@@ -3,6 +3,12 @@
 #include "Utils.h"
 #include "ini.h"
 #include "config.h"
+#ifndef SPDLOG
+#define FMT_UNICODE 0
+#include "spdlog/spdlog.h"
+#include "spdlog/sinks/base_sink.h"
+#define SPDLOG
+#endif
 
 int TimeBase = 5;
 float FrameRateModifier = 1.0f;
@@ -122,9 +128,42 @@ bool MGS3_InitializeOffsets()
         cameraSpeedModifierB = (float*)(GameBase + 0x9186E0);
         realTimeRate = (float*)(GameBase + 0x8F90E0);
         break;
+    case 0x1000500010000:
+        GV_TimeBase = (int*)(GameBase + 0x1D97D10);
+        ActorWaitValue = (double*)(GameBase + 0x8F2DF8);
+        CutsceneFlag = (int*)(GameBase + 0x1E4BA50);
+        cameraSpeedModifierA = (float*)(GameBase + 0x8F24C4);
+        cameraSpeedModifierB = (float*)(GameBase + 0x9186E0);
+        realTimeRate = (float*)(GameBase + 0x8F90E0);
+        break;
+    case 0x2000000000000:
+        GV_TimeBase = (int*)(GameBase + 0x1D97D10);
+        ActorWaitValue = (double*)(GameBase + 0x8F2DF8);
+        CutsceneFlag = (int*)(GameBase + 0x1E4BA50);
+        cameraSpeedModifierA = (float*)(GameBase + 0x8F24C4);
+        cameraSpeedModifierB = (float*)(GameBase + 0x9186E0);
+        realTimeRate = (float*)(GameBase + 0x8F90E0);
+        break;
+    case 0x2000000010000:  //done
+        GV_TimeBase = (int*)(GameBase + 0x1D77740);
+        ActorWaitValue = (double*)(GameBase + 0x8B7C08);
+        CutsceneFlag = (int*)(GameBase + 0x1E2B530); 
+        cameraSpeedModifierA = (float*)(GameBase + 0x8B71C0); 
+        cameraSpeedModifierB = (float*)(GameBase + 0x8F0790); 
+        realTimeRate = (float*)(GameBase + 0x8D0F70); 
+        break;
     default:
+        spdlog::error("MGS3: Unsupported game version!");
         return false;
     }
+
+    //logging
+    GV_TimeBase == NULL ? spdlog::info("MGS3: MGS3_InitializeOffsets() - failed to find GV_TimeBase") : spdlog::info("MGS3: MGS3_InitializeOffsets() - GV_TimeBase found.");
+    ActorWaitValue == NULL ? spdlog::info("MGS3: MGS3_InitializeOffsets() - failed to find ActorWaitValue") : spdlog::info("MGS3: MGS3_InitializeOffsets() - ActorWaitValue found.");
+    CutsceneFlag == NULL ? spdlog::info("MGS3: MGS3_InitializeOffsets() - failed to find CutsceneFlag") : spdlog::info("MGS3: MGS3_InitializeOffsets() - CutsceneFlag found.");
+    cameraSpeedModifierA == NULL ? spdlog::info("MGS3: MGS3_InitializeOffsets() - failed to find cameraSpeedModifierA") : spdlog::info("MGS3: MGS3_InitializeOffsets() - cameraSpeedModifierA found.");
+    cameraSpeedModifierB == NULL ? spdlog::info("MGS3: MGS3_InitializeOffsets() - failed to find cameraSpeedModifierB") : spdlog::info("MGS3: MGS3_InitializeOffsets() - cameraSpeedModifierB found.");
+    realTimeRate == NULL ? spdlog::info("MGS3: MGS3_InitializeOffsets() - failed to find realTimeRate") : spdlog::info("MGS3: MGS3_InitializeOffsets() - realTimeRate found.");
 
     DWORD oldProtect;
     VirtualProtect(ActorWaitValue, 8, PAGE_READWRITE, &oldProtect);
@@ -152,7 +191,15 @@ void MGS3_InstallHooks()
     uintptr_t updateMotionBOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 85 C9 74 3F 0F 57 C0 0F 2F C1 76 0B 66 0F 6E");
     uintptr_t getTargetFpsOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 83 EC 28 E8 ?? ?? FD FF 83 F8 01 B9 3C 00 00");
     uintptr_t throwItemOffset = (uintptr_t)Memory::PatternScan(GameModule, "40 55 56 57 41 56 41 57 48 8D 6C 24 E0 48 81 EC");
-    uintptr_t animBlendOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 89 5C 24 08 57 48 83  EC 30 0F 29 74 24 20 0F");
+    uintptr_t animBlendOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 89 5C 24 08 57 48 83 EC 30 0F 29 74 24 20 0F");
+
+    //logging
+    getTimeBaseOffset ? spdlog::info("MGS3: InstallHooks() - getTimeBaseOffset() found: Offset is {:x}", (uintptr_t)getTimeBaseOffset - (uintptr_t)GameModule) : spdlog::error("MGS3: InstallHooks() failed to find getTimeBaseOffset");
+    updateMotionAOffset ? spdlog::info("MGS3: InstallHooks() - updateMotionAOffset() found: Offset is {:x}", (uintptr_t)updateMotionAOffset - (uintptr_t)GameModule) : spdlog::error("MGS3: InstallHooks() failed to find updateMotionAOffset");
+    updateMotionBOffset ? spdlog::info("MGS3: InstallHooks() - updateMotionBOffset() found: Offset is {:x}", (uintptr_t)updateMotionBOffset - (uintptr_t)GameModule) : spdlog::error("MGS3: InstallHooks() failed to find updateMotionBOffset");
+    getTargetFpsOffset ? spdlog::info("MGS3: InstallHooks() - getTargetFpsOffset() found: Offset is {:x}", (uintptr_t)getTargetFpsOffset - (uintptr_t)GameModule) : spdlog::error("MGS3: InstallHooks() failed to find getTargetFpsOffset");
+    throwItemOffset ? spdlog::info("MGS3: InstallHooks() - throwItemOffset() found: Offset is {:x}", (uintptr_t)throwItemOffset - (uintptr_t)GameModule) : spdlog::error("MGS3: InstallHooks() failed to find throwItemOffset");
+    animBlendOffset ? spdlog::info("MGS3: InstallHooks() - animBlendOffset() found: Offset is {:x}", (uintptr_t)animBlendOffset - (uintptr_t)GameModule) : spdlog::error("MGS3: InstallHooks() failed to find animBlendOffset");
 
     Memory::DetourFunction(getTimeBaseOffset, (LPVOID)GetTimeBaseHook, (LPVOID*)&GetTimeBase);
     Memory::DetourFunction(updateMotionAOffset, (LPVOID)UpdateMotionTimeBaseAHook, (LPVOID*)&UpdateMotionTimeBaseA);
@@ -168,6 +215,8 @@ void MGS3_Init()
         return;
 
     MGS3_InstallHooks();
+    
+    spdlog::info("MGS3: Intiailization successful!");
 
     while (true)
     {
