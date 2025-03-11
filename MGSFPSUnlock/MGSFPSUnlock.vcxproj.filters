@@ -3,10 +3,9 @@
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="Memory.cpp" />
-    <ClCompile Include="MGS3\game.cpp">
-      <Filter>MGS3</Filter>
-    </ClCompile>
     <ClCompile Include="Utils.cpp" />
+    <ClCompile Include="MGS2\mgs2.cpp" />
+    <ClCompile Include="MGS3\mgs3.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="includes\ini.h" />
@@ -15,6 +14,8 @@
     <ClInclude Include="includes\Utils.h" />
     <ClInclude Include="MGS3\mgs3.h" />
     <ClInclude Include="includes\config.h" />
+    <ClInclude Include="MGS2\mgs2.h" />
+    <ClInclude Include="includes\stdafx.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="MGS3">
