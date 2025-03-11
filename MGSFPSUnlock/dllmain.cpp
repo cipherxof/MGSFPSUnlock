@@ -4,23 +4,13 @@
 #include "Utils.h"
 #include "ini.h"
 #include "config.h"
+#include "logger.h"
 #include "MGS2/mgs2.h"
 #include "MGS3/mgs3.h"
 
-
-#ifndef SPDLOG
-#define FMT_UNICODE 0
-#include "spdlog/spdlog.h"
-#include "spdlog/sinks/base_sink.h"
-#define SPDLOG
-#endif
-
-
-
-// Logger
 std::shared_ptr<spdlog::logger> logger;
 std::string sLogFile = "MGSFPSUnlock.log";
-std::string sFixVer = "0.0.6";
+std::string sFixVer = "0.0.5";
 std::filesystem::path sExePath;
 
 GameConfig Config;
@@ -34,51 +24,7 @@ void ReadConfig()
     ini.read(ConfigValues);
 }
 
-// Spdlog sink (truncate on startup, single file)
-template<typename Mutex>
-class size_limited_sink : public spdlog::sinks::base_sink<Mutex> {
-public:
-    explicit size_limited_sink(const std::string& filename, size_t max_size)
-        : _filename(filename), _max_size(max_size) {
-        truncate_log_file();
-
-        _file.open(_filename, std::ios::app);
-        if (!_file.is_open()) {
-            throw spdlog::spdlog_ex("Failed to open log file " + filename);
-        }
-    }
-
-protected:
-    void sink_it_(const spdlog::details::log_msg& msg) override {
-        if (std::filesystem::exists(_filename) && std::filesystem::file_size(_filename) >= _max_size) {
-            return;
-        }
-
-        spdlog::memory_buf_t formatted;
-        this->formatter_->format(msg, formatted);
-
-        _file.write(formatted.data(), formatted.size());
-        _file.flush();
-    }
-
-    void flush_() override {
-        _file.flush();
-    }
-
-private:
-    std::ofstream _file;
-    std::string _filename;
-    size_t _max_size;
-
-    void truncate_log_file() {
-        if (std::filesystem::exists(_filename)) {
-            std::ofstream ofs(_filename, std::ofstream::out | std::ofstream::trunc);
-            ofs.close();
-        }
-    }
-};
-
-void Logging()
+void InitializeLogging()
 {
     // Get game name and exe path
     WCHAR exePath[_MAX_PATH] = { 0 };
@@ -88,17 +34,15 @@ void Logging()
 
     // spdlog initialisation
     {
-        try {
+        try 
+        {
             // Create 10MB truncated logger
             logger = std::make_shared<spdlog::logger>(sLogFile, std::make_shared<size_limited_sink<std::mutex>>(sExePath.string() + sLogFile, 10 * 1024 * 1024));
             spdlog::set_default_logger(logger);
-
-            spdlog::flush_on(spdlog::level::debug);
-            spdlog::info("----------");
+            logger->set_level(spdlog::level::debug);
+            spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l]: %v");
             spdlog::info("MGSFPSUnlock v{} loaded.", sFixVer.c_str());
-            spdlog::info("----------");
             spdlog::info("Log file: {}", sExePath.string() + sLogFile);
-            spdlog::info("----------");
         }
         catch (const spdlog::spdlog_ex& ex) {
             AllocConsole();
@@ -110,19 +54,20 @@ void Logging()
     }
 }
 
-
 DWORD WINAPI MainThread(LPVOID lpParam)
 {
-    Logging();
+    InitializeLogging();
     ReadConfig();
+
     spdlog::info("Config Loaded");
     spdlog::info("Target Framerate: {}", ConfigValues["Settings"]["TargetFrameRate"]);
-    spdlog::info("----------");
+
     GetGameType(GameModule, Config.gameType);
     Config.gameVersion = GetGameVersion(GameModule);
     Config.targetFramerate = std::stoi(ConfigValues["Settings"]["TargetFrameRate"]);
 
-    if (Config.gameVersion == 0) {
+    if (Config.gameVersion == 0) 
+    {
         spdlog::error("Unable to get game version, closing!");
         return false;
     }
@@ -136,13 +81,11 @@ DWORD WINAPI MainThread(LPVOID lpParam)
     {
     case GameType::MGS2:
         spdlog::info("Found Game: MGS2 - Version: {}", versionstring);
-        spdlog::info("----------");
-        MGS2_Init();
+        MGS2_Initialize();
         break;
     case GameType::MGS3:
         spdlog::info("Found Game: MGS3 - Version: {}", versionstring);
-        spdlog::info("----------");
-        MGS3_Init();
+        MGS3_Initialize();
         break;
     default:
         spdlog::error("Unknown game!");

@@ -1,3 +1,3 @@
 #pragma once
 
-void MGS3_Init();
+void MGS3_Initialize();

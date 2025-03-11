@@ -73,13 +73,14 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <TargetExt>.asi</TargetExt>
-    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);$(VC_IncludePath)\includes;</IncludePath>
+    <IncludePath>$(ProjectDir)\includes;</IncludePath>
+    <ExternalIncludePath>..\external\spdlog\include;$(ExternalIncludePath)</ExternalIncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <TargetExt>.asi</TargetExt>
     <IncludePath>$(ProjectDir)\includes;</IncludePath>
-    <OutDir>F:\SteamLibrary\steamapps\common\MGS2</OutDir>
-    <ExternalIncludePath>external\spdlog\include;$(ExternalIncludePath)</ExternalIncludePath>
+    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\</OutDir>
+    <ExternalIncludePath>..\external\spdlog\include;$(ExternalIncludePath)</ExternalIncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -162,6 +163,7 @@
     <ClInclude Include="includes\MinHook.h" />
     <ClInclude Include="includes\stdafx.h" />
     <ClInclude Include="includes\Utils.h" />
+    <ClInclude Include="logger.h" />
     <ClInclude Include="MGS2\mgs2.h" />
     <ClInclude Include="MGS3\mgs3.h" />
   </ItemGroup>

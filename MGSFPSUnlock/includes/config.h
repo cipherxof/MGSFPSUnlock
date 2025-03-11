@@ -9,7 +9,8 @@ enum class GameType
     MGS3
 };
 
-struct GameConfig {
+struct GameConfig 
+{
     GameType gameType;
     uint64_t gameVersion;
     int targetFramerate;
