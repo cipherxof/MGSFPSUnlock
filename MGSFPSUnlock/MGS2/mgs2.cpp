@@ -3,159 +3,278 @@
 #include "Utils.h"
 #include "ini.h"
 #include "config.h"
-#ifndef SPDLOG
-#define FMT_UNICODE 0
-#include "spdlog/spdlog.h"
-#include "spdlog/sinks/base_sink.h"
-#define SPDLOG
-#endif
+#include "logger.h"
 
-typedef __int64 __fastcall MGS2_ActDashFireDelegate(__int64 a1);
-typedef __int64 __fastcall MGS2_CreateDebrisTexDelegate(__int64 a1, float* a2, float* a3, unsigned int a4, int a5, int a6, float a7);
-typedef __int64 __fastcall MGS2_GetTimeBaseDelegate(struct _exception* a1);
-
-MGS2_ActDashFireDelegate* MGS2_ActDashFire;
-MGS2_CreateDebrisTexDelegate* MGS2_CreateDebrisTex;
-MGS2_GetTimeBaseDelegate* MGS2_GetTimeBase;
-
-int* MGS2_CutsceneFlag = NULL; //Realtime demos / pad demos / forced camera views / FMV's / forced story codec calls
-int* MGS2_RealtimeCutscene = NULL; //Realtime demos / pad demos / forced camera views
-int MGS2_TimeBase = 5;
-double MGS2_DashLastUpdate = 0;
-double* MGS2_ActorWaitValue = NULL;
-
-bool MGS2_IsCutsceneActive()
+class MGS2FramerateUnlocker
 {
-    return MGS2_CutsceneFlag == NULL ? false : (*MGS2_RealtimeCutscene == 1);
+public:
+    MGS2FramerateUnlocker();
+    ~MGS2FramerateUnlocker();
+
+    bool Initialize();
+    void RunUpdateLoop();
+
+private:
+    // Constants
+    static constexpr int DEFAULT_TIMEBASE = 5;
+    static constexpr float DEFAULT_FPS = 60.0f;
+
+    // Function delegates
+    typedef __int64 __fastcall ActDashFireDelegate(__int64 a1);
+    typedef __int64 __fastcall CreateDebrisTexDelegate(__int64 a1, float* a2, float* a3, unsigned int a4, int a5, int a6, float a7);
+    typedef __int64 __fastcall GetTimeBaseDelegate(struct _exception* a1);
+
+    // Game data structure
+    struct GameVariables 
+    {
+        int* timeBase;
+        double* actorWaitValue;
+        int* cutsceneFlag;
+        int* realTimeCutscene;
+    };
+
+    // Original function pointers
+    GetTimeBaseDelegate* GetTimeBase;
+    ActDashFireDelegate* ActDashFire;
+    CreateDebrisTexDelegate* CreateDebrisTex;
+
+    // Game data
+    GameVariables gameVars;
+    float frameRateModifier;
+    int timeBase;
+
+    // Private methods
+    bool InitializeOffsets();
+    bool InstallHooks();
+    bool InCutscene() const;
+    bool InRealtimeCutscene() const;
+
+    // Private members
+    double dashLastUpdate = 0;
+
+    // Hook methods
+    static MGS2FramerateUnlocker* instance;
+
+    static __int64 __fastcall ActDashFireHook(__int64 a1);
+    static __int64 __fastcall CreateDebrisTexHook(__int64 a1, float* a2, float* a3, unsigned int a4, int a5, int a6, float a7);
+    static __int64 __fastcall GetTimeBaseHook(struct _exception* a1);
+};
+
+MGS2FramerateUnlocker* MGS2FramerateUnlocker::instance = nullptr;
+
+MGS2FramerateUnlocker::MGS2FramerateUnlocker()
+    : frameRateModifier(1.0f), timeBase(DEFAULT_TIMEBASE)
+{
+    instance = this;
+    memset(&gameVars, 0, sizeof(GameVariables));
 }
 
-bool MGS2_IsRealtimeCutsceneActive()
+MGS2FramerateUnlocker::~MGS2FramerateUnlocker()
 {
-    return MGS2_RealtimeCutscene == NULL ? false : (*MGS2_RealtimeCutscene == 1);
+    instance = nullptr;
 }
 
-__int64 __fastcall MGS2_ActDashFireHook(__int64 a1)
+bool MGS2FramerateUnlocker::InCutscene() const
+{
+    return gameVars.cutsceneFlag == NULL ? false : (*gameVars.realTimeCutscene == 1);
+}
+
+bool MGS2FramerateUnlocker::InRealtimeCutscene() const
+{
+    return gameVars.cutsceneFlag == NULL ? false : (*gameVars.realTimeCutscene == 1);
+}
+
+__int64 __fastcall MGS2FramerateUnlocker::ActDashFireHook(__int64 a1)
 {   
-    if (!MGS2_IsCutsceneActive()) // ActDashFire() only needs to be slowed down during cutscenes, his boss fight runs at normal gamespeed.
-        return MGS2_ActDashFire(a1);
+    if (!instance->InCutscene()) // only slow down during cutscenes. boss fight runs at normal gamespeed.
+        return instance->ActDashFire(a1);
 
-    MGS2_DashLastUpdate += *MGS2_ActorWaitValue;
+    instance->dashLastUpdate += *instance->gameVars.actorWaitValue;
 
-    if (MGS2_DashLastUpdate < 1.0 / 30.0) 
+    if (instance->dashLastUpdate < 1.0 / 30.0)
         return 0;
 
-    MGS2_DashLastUpdate = 0;
+    instance->dashLastUpdate = 0;
 
-    return MGS2_ActDashFire(a1);
+    return instance->ActDashFire(a1);
 }
 
-__int64 __fastcall MGS2_CreateDebrisTexHook(__int64 a1, float* a2, float* a3, unsigned int a4, int a5, int a6, float a7)
+__int64 __fastcall MGS2FramerateUnlocker::CreateDebrisTexHook(__int64 a1, float* a2, float* a3, unsigned int a4, int a5, int a6, float a7)
 {
-    auto result = MGS2_CreateDebrisTex(a1, a2, a3, a4, a5, a6, a7);
+    auto result = instance->CreateDebrisTex(a1, a2, a3, a4, a5, a6, a7);
 
-    *(int*)(a1 + 100) = 15 * (MGS2_GetTimeBase(0) * ((Config.targetFramerate / 60) + 1)); // effect duration
+    *(int*)(a1 + 100) = 15 * (instance->GetTimeBase(0) * ((Config.targetFramerate / 60) + 1)); // effect duration
 
     return result;
 }
 
-__int64 __fastcall MGS2_GetTimeBaseHook(struct _exception* a1)
+__int64 __fastcall MGS2FramerateUnlocker::GetTimeBaseHook(struct _exception* a1)
 {
-    return MGS2_TimeBase;
+    return instance->timeBase;
 }
 
-bool MGS2_InitializeOffsets()
+bool MGS2FramerateUnlocker::InitializeOffsets()
 {
-    spdlog::info("MGS2: MGS2_InitializeOffsets() started.");
-    MGS2_ActorWaitValue = (double*)(Memory::PatternScan(GameModule, "42 50 5F 4D 45 4D 4A 50 45 47") + 0x18);
+    spdlog::info("Initializing offsets...");
 
-    switch (Config.gameVersion) {
-        case 0x1000200000000:
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xAADA64);
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16CE4B8);
-            break;
-        case 0x1000300000000:
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xAADA64);
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16CE4B8);
-            break;
-        case 0x1000400000000:
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xAB4C74);
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16D5638);
-            break;
-        case 0x1000400010000:
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xAB4C74);
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16D5638);
-            break;
-        case 0x1000500010000:
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xA8CD74);
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16AD878);
-            break;
-        case 0x2000000000000:
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xAA8F84);
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16CA5D8);
-            break;
-        case 0x2000000010000: 
-            MGS2_CutsceneFlag = (int*)(GameBase + 0xAA9F94);
-            MGS2_RealtimeCutscene = (int*)(GameBase + 0x16CB5D8);
-            break;
-        default:
-            spdlog::error("MGS2: Unsupported game version!");
+    instance->gameVars.actorWaitValue = (double*)(Memory::PatternScan(GameModule, "42 50 5F 4D 45 4D 4A 50 45 47") + 0x18);
+
+    switch (Config.gameVersion) 
+    {
+    case 0x1000200000000:
+        instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAADA64);
+        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16CE4B8);
+        break;
+    case 0x1000300000000:
+        instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAADA64);
+        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16CE4B8);
+        break;
+    case 0x1000400000000:
+        instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAB4C74);
+        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16D5638);
+        break;
+    case 0x1000400010000:
+        instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAB4C74);
+        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16D5638);
+        break;
+    case 0x1000500010000:
+        instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xA8CD74);
+        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16AD878);
+        break;
+    case 0x2000000000000:
+        instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAA8F84);
+        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16CA5D8);
+        break;
+    case 0x2000000010000:
+        instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAA9F94);
+        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16CB5D8);
+        break;
+    default:
+        spdlog::error("Unsupported game version: {:#x}", Config.gameVersion);
+        return false;
     }
 
-    //logging
-    MGS2_ActorWaitValue ? spdlog::info("MGS2: MGS2_InitializeOffsets() - MGS2_ActorWaitValue found: Offset is {:x}", (uintptr_t)MGS2_ActorWaitValue - (uintptr_t)GameModule) : spdlog::error("MGS2: MGS2_InitializeOffsets() failed to find MGS2_ActorWaitValue");
-    MGS2_CutsceneFlag == NULL ? spdlog::error("MGS2: MGS2_InitializeOffsets() - failed to find MGS2_CutsceneFlag") : spdlog::info("MGS2: MGS2_InitializeOffsets() - MGS2_CutsceneFlag found.");
-    MGS2_RealtimeCutscene == NULL ? spdlog::error("MGS2: MGS2_InitializeOffsets() - failed to find MGS2_RealtimeCutscene") : spdlog::info("MGS2: MGS2_InitializeOffsets() - MGS2_RealtimeCutscene found.");
+    if (!instance->gameVars.actorWaitValue ||
+        !instance->gameVars.cutsceneFlag ||
+        !instance->gameVars.realTimeCutscene)
+    {
+        spdlog::error("Failed to initialize one or more critical offsets");
+        return false;
+    }
 
+    spdlog::debug("timeBase = {:#x}", reinterpret_cast<uintptr_t>(gameVars.timeBase) - GameBase);
+    spdlog::debug("actorWaitValue = {:#x}", reinterpret_cast<uintptr_t>(gameVars.actorWaitValue) - GameBase);
+    spdlog::debug("cutsceneFlag = {:#x}", reinterpret_cast<uintptr_t>(gameVars.cutsceneFlag) - GameBase);
+    spdlog::debug("realTimeCutscene = {:#x}", reinterpret_cast<uintptr_t>(gameVars.realTimeCutscene) - GameBase);
 
     DWORD oldProtect;
-    VirtualProtect(MGS2_ActorWaitValue, 8, PAGE_READWRITE, &oldProtect);
-    spdlog::info("MGS2: MGS2_InitializeOffsets() finished.");
+    VirtualProtect(instance->gameVars.actorWaitValue, 8, PAGE_READWRITE, &oldProtect);
+    spdlog::info("InitializeOffsets() finished.");
     return true;
 }
 
-void MGS2_InstallHooks()
+
+bool MGS2FramerateUnlocker::InstallHooks()
 {
-    int status = MH_Initialize();
-    spdlog::info("MGS2: MGS2_InstallHooks() started.");
+    spdlog::info("Installing hooks");
 
-    uintptr_t actDashFireOffset = (uintptr_t)Memory::PatternScan(GameModule, "?? ?? ?? ?? ?? 49 8D AB 68 FE FF FF 48 81 EC 88");
-    uintptr_t createDebrisTexOffset = (uintptr_t)Memory::PatternScan(GameModule, "40 55 53 56 57 41 54 41 56 41 57 48 8D AC 24 00");
-    uintptr_t getTimeBaseOffset = (uintptr_t)Memory::PatternScan(GameModule, "48 83 EC 28 E8 ?? ?? ?? ?? 33 C9 83 F8 01 0F 94");
-    
-    //logging
-    actDashFireOffset ? spdlog::info("MGS2: MGS2_InstallHooks() - actDashFireOffset() found: Offset is {:x}", (uintptr_t)actDashFireOffset - (uintptr_t)GameModule) : spdlog::error("MGS2: MGS2_InstallHooks() failed to find actDashFireOffset");
-    createDebrisTexOffset ? spdlog::info("MGS2: MGS2_InstallHooks() - createDebrisTexOffset() found: Offset is {:x}", (uintptr_t)createDebrisTexOffset - (uintptr_t)GameModule) : spdlog::error("MGS2: MGS2_InstallHooks() failed to find createDebrisTexOffset");
-    getTimeBaseOffset ? spdlog::info("MGS2: MGS2_InstallHooks() - getTimeBaseOffset() found: Offset is {:x}", (uintptr_t)getTimeBaseOffset - (uintptr_t)GameModule) : spdlog::error("MGS2: MGS2_InstallHooks() failed to find getTimeBaseOffset");
+    MH_STATUS status = MH_Initialize();
+    if (status != MH_OK)
+    {
+        spdlog::error("Failed to initialize MinHook, status: {}", (int)status);
+        return false;
+    }
 
+    uint8_t* getTimeBaseOffset = Memory::PatternScan(GameModule, "48 83 EC 28 E8 ?? ?? ?? ?? 33 C9 83 F8 01 0F 94");
+    uint8_t* actDashFireOffset = Memory::PatternScan(GameModule, "?? ?? ?? ?? ?? 49 8D AB 68 FE FF FF 48 81 EC 88");
+    uint8_t* createDebrisTexOffset = Memory::PatternScan(GameModule, "40 55 53 56 57 41 54 41 56 41 57 48 8D AC 24 00");
 
-    Memory::DetourFunction(actDashFireOffset, (LPVOID)MGS2_ActDashFireHook, (LPVOID*)&MGS2_ActDashFire);
-    Memory::DetourFunction(createDebrisTexOffset, (LPVOID)MGS2_CreateDebrisTexHook, (LPVOID*)&MGS2_CreateDebrisTex);
-    Memory::DetourFunction(getTimeBaseOffset, (LPVOID)MGS2_GetTimeBaseHook, (LPVOID*)&MGS2_GetTimeBase);
+    if (!actDashFireOffset || !createDebrisTexOffset || !getTimeBaseOffset)
+    {
+        spdlog::error("Failed to find one or more function patterns");
+        return false;
+    }
 
-    spdlog::info("MGS2: MGS2_InstallHooks() finished.");
+    spdlog::debug("getTimeBaseOffset = {:#x}", reinterpret_cast<uintptr_t>(getTimeBaseOffset) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("actDashFireOffset = {:#x}", reinterpret_cast<uintptr_t>(actDashFireOffset) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("createDebrisTexOffset = {:#x}", reinterpret_cast<uintptr_t>(createDebrisTexOffset) - reinterpret_cast<uintptr_t>(GameModule));
+
+    MH_CreateHook(getTimeBaseOffset, GetTimeBaseHook, reinterpret_cast<void**>(&GetTimeBase));
+    MH_CreateHook(createDebrisTexOffset, CreateDebrisTexHook, reinterpret_cast<void**>(&CreateDebrisTex));
+    MH_CreateHook(actDashFireOffset, ActDashFireHook, reinterpret_cast<void**>(&ActDashFire));
+
+    if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK)
+    {
+        spdlog::error("Failed to create or enable one or more hooks");
+        MH_Uninitialize();
+        return false;
+    }
+
+    spdlog::info("All hooks installed successfully");
+    return true;
 }
 
-void MGS2_Init()
+void MGS2FramerateUnlocker::RunUpdateLoop()
 {
-    MGS2_InitializeOffsets();
-    MGS2_InstallHooks();
-
     while (true)
     {
-        if (MGS2_ActorWaitValue != NULL)
+        if (gameVars.actorWaitValue != nullptr)
         {
-            if (MGS2_IsCutsceneActive())
+            if (InCutscene())
             {
-                MGS2_TimeBase = 5;
-                *MGS2_ActorWaitValue = 1.0 / 60.0;
+                *gameVars.timeBase = DEFAULT_TIMEBASE;
+                *gameVars.actorWaitValue = 1.0 / DEFAULT_FPS;
             }
             else
             {
-                auto mod = (float)Config.targetFramerate / 60.0f;
-                MGS2_TimeBase = std::round(5.0f / mod - 0.1);
-                *MGS2_ActorWaitValue = 1.0 / (double)Config.targetFramerate;
+                auto mod = (float)Config.targetFramerate / DEFAULT_FPS;
+                *gameVars.timeBase = std::round(DEFAULT_TIMEBASE / mod - 0.1);
+                *gameVars.actorWaitValue = 1.0 / (double)Config.targetFramerate;
             }
         }
         Sleep(1);
     }
+}
+
+bool MGS2FramerateUnlocker::Initialize()
+{
+    spdlog::info("Initializing framerate unlocker...");
+
+    if (!InitializeOffsets())
+    {
+        spdlog::error("Failed to initialize offsets");
+        return false;
+    }
+
+    if (!InstallHooks())
+    {
+        spdlog::error("Failed to install hooks");
+        return false;
+    }
+
+    frameRateModifier = static_cast<float>(Config.targetFramerate) / DEFAULT_FPS;
+    timeBase = std::round(DEFAULT_TIMEBASE / frameRateModifier - 0.1);
+
+    // Apply initial values
+    *gameVars.timeBase = timeBase;
+    *gameVars.actorWaitValue = 1.0 / static_cast<double>(Config.targetFramerate);
+
+    spdlog::info("Initialization complete. Target framerate: {}", Config.targetFramerate);
+    return true;
+}
+
+void MGS2_Initialize()
+{
+    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] MGS2: %v");
+    spdlog::info("Starting framerate unlocker");
+
+    MGS2FramerateUnlocker unlocker;
+
+    if (!unlocker.Initialize())
+    {
+        spdlog::error("Failed to initialize the framerate unlocker");
+        return;
+    }
+
+    unlocker.RunUpdateLoop(); // should maybe hook actorExec instead
 }

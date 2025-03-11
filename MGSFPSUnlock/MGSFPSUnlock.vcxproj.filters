@@ -4,22 +4,51 @@
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="Memory.cpp" />
     <ClCompile Include="Utils.cpp" />
-    <ClCompile Include="MGS2\mgs2.cpp" />
-    <ClCompile Include="MGS3\mgs3.cpp" />
+    <ClCompile Include="MGS2\mgs2.cpp">
+      <Filter>MGS2</Filter>
+    </ClCompile>
+    <ClCompile Include="MGS3\mgs3.cpp">
+      <Filter>MGS3</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="includes\ini.h" />
-    <ClInclude Include="includes\Memory.h" />
-    <ClInclude Include="includes\MinHook.h" />
-    <ClInclude Include="includes\Utils.h" />
-    <ClInclude Include="MGS3\mgs3.h" />
-    <ClInclude Include="includes\config.h" />
-    <ClInclude Include="MGS2\mgs2.h" />
-    <ClInclude Include="includes\stdafx.h" />
+    <ClInclude Include="MGS2\mgs2.h">
+      <Filter>MGS2</Filter>
+    </ClInclude>
+    <ClInclude Include="MGS3\mgs3.h">
+      <Filter>MGS3</Filter>
+    </ClInclude>
+    <ClInclude Include="includes\config.h">
+      <Filter>includes</Filter>
+    </ClInclude>
+    <ClInclude Include="includes\ini.h">
+      <Filter>includes</Filter>
+    </ClInclude>
+    <ClInclude Include="logger.h">
+      <Filter>includes</Filter>
+    </ClInclude>
+    <ClInclude Include="includes\Memory.h">
+      <Filter>includes</Filter>
+    </ClInclude>
+    <ClInclude Include="includes\MinHook.h">
+      <Filter>includes</Filter>
+    </ClInclude>
+    <ClInclude Include="includes\stdafx.h">
+      <Filter>includes</Filter>
+    </ClInclude>
+    <ClInclude Include="includes\Utils.h">
+      <Filter>includes</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="MGS3">
       <UniqueIdentifier>{41837e79-f57f-43c6-8364-62de24213c0e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="MGS2">
+      <UniqueIdentifier>{fbda13db-9b45-4ecd-bc1f-f5ab9da2dddf}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="includes">
+      <UniqueIdentifier>{6bf4a300-050b-439a-b288-f1a439f6681d}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>
