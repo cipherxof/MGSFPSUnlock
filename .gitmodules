@@ -1,0 +1,3 @@
+[submodule "MGSFPSUnlock/external/spdlog"]
+	path = MGSFPSUnlock/external/spdlog
+	url = ../../gabime/spdlog
