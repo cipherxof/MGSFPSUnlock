@@ -332,7 +332,6 @@ bool MGS3FramerateUnlocker::Initialize()
 
 void MGS3_Initialize()
 {
-    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] MGS3: %v");
     spdlog::info("Starting framerate unlocker");
 
     MGS3FramerateUnlocker unlocker;

@@ -267,7 +267,6 @@ bool MGS2FramerateUnlocker::Initialize()
 
 void MGS2_Initialize()
 {
-    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] MGS2: %v");
     spdlog::info("Starting framerate unlocker");
 
     MGS2FramerateUnlocker unlocker;
