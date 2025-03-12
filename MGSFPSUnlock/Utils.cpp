@@ -6,6 +6,7 @@
 void GetGameType(HMODULE gameModule, GameType& result)
 {
     char exePath[_MAX_PATH] = { 0 };
+    GetModuleFileNameA(gameModule, exePath, _MAX_PATH);
     char* filename = PathFindFileNameA(exePath);
     printf("%s\n", filename);
     
