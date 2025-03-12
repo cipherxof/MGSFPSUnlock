@@ -3,7 +3,7 @@
 #include "Utils.h"
 #include "ini.h"
 #include "config.h"
-#include "logger.h"
+#include "spdlog/spdlog.h"
 
 class MGS3FramerateUnlocker 
 {

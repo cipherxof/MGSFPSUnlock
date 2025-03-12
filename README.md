@@ -12,3 +12,25 @@ This is an experimental mod that allows you to play Metal Gear Solid 3 at framer
 - [x] MGS3 Support
 - [ ] MGS2 Support
 - [ ] Variable Framerate
+
+## Building
+
+```bash
+git clone https://github.com/cipherxof/MGSFPSUnlock.git
+cd MGSFPSUnlock
+git submodule update --init
+```
+
+### Windows
+
+Open MGSFPSUnlock.sln in Visual Studio (2022) and build
+
+### Linux
+
+Install `mingw-w64-gcc`
+
+```bash
+mkdir build && cd build
+cmake ..
+make
+```

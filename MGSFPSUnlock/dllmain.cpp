@@ -4,7 +4,8 @@
 #include "Utils.h"
 #include "ini.h"
 #include "config.h"
-#include "logger.h"
+#include "spdlog/spdlog.h"
+#include "spdlog/sinks/basic_file_sink.h"
 #include "MGS2/mgs2.h"
 #include "MGS3/mgs3.h"
 
@@ -26,7 +27,7 @@ void ReadConfig()
     ini.read(ConfigValues);
 }
 
-void InitializeLogging()
+void InitializeLogger()
 {
     // Get game name and exe path
     WCHAR exePath[_MAX_PATH] = { 0 };
@@ -34,14 +35,13 @@ void InitializeLogging()
     sExePath = exePath;
     sExePath = sExePath.remove_filename();
 
-    // spdlog initialisation
     {
         try 
         {
-            // Create 10MB truncated logger
-            logger = std::make_shared<spdlog::logger>(sLogFile, std::make_shared<size_limited_sink<std::mutex>>(sExePath.string() + sLogFile, 10 * 1024 * 1024));
-            spdlog::set_default_logger(logger);
+            logger = spdlog::basic_logger_mt("MGSFPSUnlock", "MGSFPSUnlock.log", true);
             logger->set_level(spdlog::level::debug);
+            logger->flush_on(spdlog::level::debug);
+            spdlog::set_default_logger(logger);
             spdlog::set_pattern(LOG_FORMAT_PREFIX ": %v");
             spdlog::info("MGSFPSUnlock v{} loaded.", sFixVer.c_str());
             spdlog::info("Log file: {}", sExePath.string() + sLogFile);
@@ -58,7 +58,7 @@ void InitializeLogging()
 
 DWORD WINAPI MainThread(LPVOID lpParam)
 {
-    InitializeLogging();
+    InitializeLogger();
     ReadConfig();
 
     spdlog::info("Config Loaded");
