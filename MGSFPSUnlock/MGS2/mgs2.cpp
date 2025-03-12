@@ -29,7 +29,7 @@ private:
     {
         double* actorWaitValue;
         int* cutsceneFlag;
-        int* realTimeCutscene;
+        int* demoCutsceneFlag;
     };
 
     // Original function pointers
@@ -46,7 +46,7 @@ private:
     bool InitializeOffsets();
     bool InstallHooks();
     bool InCutscene() const;
-    bool InRealtimeCutscene() const;
+    bool InDemoCutscene() const;
 
     // Private members
     double dashLastUpdate = 0;
@@ -75,17 +75,17 @@ MGS2FramerateUnlocker::~MGS2FramerateUnlocker()
 
 bool MGS2FramerateUnlocker::InCutscene() const
 {
-    return gameVars.cutsceneFlag == NULL ? false : (*gameVars.realTimeCutscene == 1);
+    return gameVars.cutsceneFlag == NULL ? false : (*gameVars.cutsceneFlag == 1);
 }
 
-bool MGS2FramerateUnlocker::InRealtimeCutscene() const
+bool MGS2FramerateUnlocker::InDemoCutscene() const
 {
-    return gameVars.cutsceneFlag == NULL ? false : (*gameVars.realTimeCutscene == 1);
+    return gameVars.demoCutsceneFlag == NULL ? false : (*gameVars.demoCutsceneFlag == 1);
 }
 
 __int64 __fastcall MGS2FramerateUnlocker::ActDashFireHook(__int64 a1)
 {   
-    if (!instance->InCutscene()) // only slow down during cutscenes. boss fight runs at normal gamespeed.
+    if (!instance->InDemoCutscene()) // only slow down during demo cutscenes. boss fight runs at normal gamespeed.
         return instance->ActDashFire(a1);
 
     instance->dashLastUpdate += *instance->gameVars.actorWaitValue;
@@ -122,31 +122,31 @@ bool MGS2FramerateUnlocker::InitializeOffsets()
     {
     case 0x1000200000000:
         instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAADA64);
-        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16CE4B8);
+        instance->gameVars.demoCutsceneFlag = reinterpret_cast<int*>(GameBase + 0x16CE4B8);
         break;
     case 0x1000300000000:
         instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAADA64);
-        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16CE4B8);
+        instance->gameVars.demoCutsceneFlag = reinterpret_cast<int*>(GameBase + 0x16CE4B8);
         break;
     case 0x1000400000000:
         instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAB4C74);
-        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16D5638);
+        instance->gameVars.demoCutsceneFlag = reinterpret_cast<int*>(GameBase + 0x16D5638);
         break;
     case 0x1000400010000:
         instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAB4C74);
-        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16D5638);
+        instance->gameVars.demoCutsceneFlag = reinterpret_cast<int*>(GameBase + 0x16D5638);
         break;
     case 0x1000500010000:
         instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xA8CD74);
-        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16AD878);
+        instance->gameVars.demoCutsceneFlag = reinterpret_cast<int*>(GameBase + 0x16AD878);
         break;
     case 0x2000000000000:
         instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAA8F84);
-        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16CA5D8);
+        instance->gameVars.demoCutsceneFlag = reinterpret_cast<int*>(GameBase + 0x16CA5D8);
         break;
     case 0x2000000010000:
         instance->gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0xAA9F94);
-        instance->gameVars.realTimeCutscene = reinterpret_cast<int*>(GameBase + 0x16CB5D8);
+        instance->gameVars.demoCutsceneFlag = reinterpret_cast<int*>(GameBase + 0x16CB5D8);
         break;
     default:
         spdlog::error("Unsupported game version: {:#x}", Config.gameVersion);
@@ -155,7 +155,7 @@ bool MGS2FramerateUnlocker::InitializeOffsets()
 
     if (!instance->gameVars.actorWaitValue ||
         !instance->gameVars.cutsceneFlag ||
-        !instance->gameVars.realTimeCutscene)
+        !instance->gameVars.demoCutsceneFlag)
     {
         spdlog::error("Failed to initialize one or more critical offsets");
         return false;
@@ -163,7 +163,7 @@ bool MGS2FramerateUnlocker::InitializeOffsets()
 
     spdlog::debug("actorWaitValue = {:#x}", reinterpret_cast<uintptr_t>(gameVars.actorWaitValue) - GameBase);
     spdlog::debug("cutsceneFlag = {:#x}", reinterpret_cast<uintptr_t>(gameVars.cutsceneFlag) - GameBase);
-    spdlog::debug("realTimeCutscene = {:#x}", reinterpret_cast<uintptr_t>(gameVars.realTimeCutscene) - GameBase);
+    spdlog::debug("demoCutsceneFlag = {:#x}", reinterpret_cast<uintptr_t>(gameVars.demoCutsceneFlag) - GameBase);
 
     DWORD oldProtect;
     VirtualProtect(instance->gameVars.actorWaitValue, 8, PAGE_READWRITE, &oldProtect);
@@ -237,6 +237,11 @@ void MGS2FramerateUnlocker::RunUpdateLoop()
 bool MGS2FramerateUnlocker::Initialize()
 {
     spdlog::info("Initializing framerate unlocker...");
+
+    if (Config.targetFramerate > DEFAULT_FPS) { //A LOT more work is needed before we support unlocked framerate.
+        Config.targetFramerate = DEFAULT_FPS;
+        spdlog::warn("MGS2 currently only supports framerate related bugfixes and not fully unlocked FPS. Setting target to {}.", DEFAULT_FPS);
+    }
 
     if (!InitializeOffsets())
     {
