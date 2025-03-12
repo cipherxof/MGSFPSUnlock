@@ -27,7 +27,6 @@ private:
     // Game data structure
     struct GameVariables 
     {
-        int* timeBase;
         double* actorWaitValue;
         int* cutsceneFlag;
         int* realTimeCutscene;
@@ -162,7 +161,6 @@ bool MGS2FramerateUnlocker::InitializeOffsets()
         return false;
     }
 
-    spdlog::debug("timeBase = {:#x}", reinterpret_cast<uintptr_t>(gameVars.timeBase) - GameBase);
     spdlog::debug("actorWaitValue = {:#x}", reinterpret_cast<uintptr_t>(gameVars.actorWaitValue) - GameBase);
     spdlog::debug("cutsceneFlag = {:#x}", reinterpret_cast<uintptr_t>(gameVars.cutsceneFlag) - GameBase);
     spdlog::debug("realTimeCutscene = {:#x}", reinterpret_cast<uintptr_t>(gameVars.realTimeCutscene) - GameBase);
@@ -222,13 +220,13 @@ void MGS2FramerateUnlocker::RunUpdateLoop()
         {
             if (InCutscene())
             {
-                *gameVars.timeBase = DEFAULT_TIMEBASE;
+                timeBase = DEFAULT_TIMEBASE;
                 *gameVars.actorWaitValue = 1.0 / DEFAULT_FPS;
             }
             else
             {
                 auto mod = (float)Config.targetFramerate / DEFAULT_FPS;
-                *gameVars.timeBase = std::round(DEFAULT_TIMEBASE / mod - 0.1);
+                timeBase = std::round(DEFAULT_TIMEBASE / mod - 0.1);
                 *gameVars.actorWaitValue = 1.0 / (double)Config.targetFramerate;
             }
         }
@@ -256,7 +254,6 @@ bool MGS2FramerateUnlocker::Initialize()
     timeBase = std::round(DEFAULT_TIMEBASE / frameRateModifier - 0.1);
 
     // Apply initial values
-    *gameVars.timeBase = timeBase;
     *gameVars.actorWaitValue = 1.0 / static_cast<double>(Config.targetFramerate);
 
     spdlog::info("Initialization complete. Target framerate: {}", Config.targetFramerate);
