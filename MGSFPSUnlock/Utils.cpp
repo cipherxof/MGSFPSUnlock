@@ -1,44 +1,46 @@
 #include "Utils.h"
+#include <windows.h>
+#include <shlwapi.h>
+#include <string>
 
 void GetGameType(HMODULE gameModule, GameType& result)
 {
-    WCHAR exePath[_MAX_PATH] = { 0 };
-    GetModuleFileName(gameModule, exePath, MAX_PATH);
-    WCHAR* filename = PathFindFileName(exePath);
-
-    printf("%ls\n", filename);
-
-    if (wcscmp(filename, L"METAL GEAR SOLID2.exe") == 0)
+    char exePath[_MAX_PATH] = { 0 };
+    char* filename = PathFindFileNameA(exePath);
+    printf("%s\n", filename);
+    
+    if (strcmp(filename, "METAL GEAR SOLID2.exe") == 0)
         result = GameType::MGS2;
-    else if (wcscmp(filename, L"METAL GEAR SOLID3.exe") == 0)
+    else if (strcmp(filename, "METAL GEAR SOLID3.exe") == 0)
         result = GameType::MGS3;
-    else 
+    else
         result = GameType::Unknown;
 }
 
 uint64_t GetGameVersion(HMODULE gameModule)
 {
-    WCHAR exePath[_MAX_PATH] = { 0 };
-    GetModuleFileName(gameModule, exePath, MAX_PATH);
-    WCHAR* filename = PathFindFileName(exePath);
+    char exePath[_MAX_PATH] = { 0 };
+    GetModuleFileNameA(gameModule, exePath, _MAX_PATH);
+    char* filename = PathFindFileNameA(exePath);
 
-    if (wcsncmp(filename, L"launcher.exe", 13) == 0)
+    if (strncmp(filename, "launcher.exe", 13) == 0)
     {
         return 0;
     }
 
-    DWORD  verHandle = 0;
-    UINT   size = 0;
+    DWORD verHandle = 0;
+    UINT size = 0;
     LPBYTE lpBuffer = NULL;
-    DWORD  verSize = GetFileVersionInfoSize(exePath, &verHandle);
-
-    if (verSize != NULL)
+    
+    DWORD verSize = GetFileVersionInfoSizeA(exePath, &verHandle);
+    
+    if (verSize != 0)
     {
-        LPSTR verData = new char[verSize];
+        BYTE* verData = new BYTE[verSize];
 
-        if (GetFileVersionInfo(exePath, verHandle, verSize, verData))
+        if (GetFileVersionInfoA(exePath, verHandle, verSize, verData))
         {
-            if (VerQueryValue(verData, L"\\", (VOID FAR * FAR*) & lpBuffer, &size))
+            if (VerQueryValueA(verData, "\\", (VOID FAR* FAR*)&lpBuffer, &size))
             {
                 if (size)
                 {
@@ -48,15 +50,13 @@ uint64_t GetGameVersion(HMODULE gameModule)
                         ULARGE_INTEGER version;
                         version.LowPart = verInfo->dwFileVersionLS;
                         version.HighPart = verInfo->dwFileVersionMS;
-
+                        delete[] verData;
                         return version.QuadPart;
                     }
                 }
             }
         }
-
         delete[] verData;
     }
-
     return 0;
 }

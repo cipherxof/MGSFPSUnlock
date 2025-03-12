@@ -2,11 +2,11 @@
 
 #define WIN32_LEAN_AND_MEAN
 
-#include <SDKDDKVer.h>
+//#include <SDKDDKVer.h>
 #include <cassert>
-#include <Windows.h>
+#include <windows.h>
 #include <winsock2.h>
-#include <Shlobj.h>
+#include <shlobj.h>
 #include <cstdint>
 #include <sstream>
 #include <fstream>
