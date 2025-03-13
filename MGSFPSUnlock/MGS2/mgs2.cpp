@@ -30,6 +30,12 @@ private:
     typedef __int64 __fastcall sub_4CACF0Delegate(__int64 a1, int* a2, int a3, int a4, int a5, __int16 a6, float a7, int a8, int a9);
     typedef __int64 __fastcall sub_6ED70Delegate(unsigned __int8* a1, __int64 a2);
     typedef __int64 __fastcall sub_53EFF0Delegate(__int64 a1);
+    typedef __int64 __fastcall sub_4AB220Delegate(__int64 a1);
+    typedef __int64 __fastcall sub_14410Delegate(__int64 a1);
+    typedef __int64 __fastcall sub_14300Delegate(__int64 a1);
+    typedef __int64 __fastcall sub_6EB70Delegate(unsigned int a1, int a2, unsigned int a3);
+    typedef __int64 __fastcall sub_407980Delegate(__int64 a1, __int64 a2, int a3);
+    typedef __int64 __fastcall sub_162890Delegate(__int64 a1, __int16 a2, __int16 a3, __int16 a4);
 
     // Game data structure
     struct GameVariables 
@@ -41,6 +47,8 @@ private:
 
         float* frameScaleFactorA;
         float* frameScaleFactorB; // sadly reused by non-frame related funcs too
+        float* frameScaleFactorC;
+        float* frameScaleFactorD;
     };
 
     // Original function pointers
@@ -54,6 +62,12 @@ private:
     sub_4CACF0Delegate* sub_4CACF0;
     sub_6ED70Delegate* sub_6ED70;
     sub_53EFF0Delegate* sub_53EFF0;
+    sub_4AB220Delegate* sub_4AB220;
+    sub_14410Delegate* sub_14410;
+    sub_14300Delegate* sub_14300;
+    sub_6EB70Delegate* sub_6EB70;
+    sub_407980Delegate* sub_407980;
+    sub_162890Delegate* sub_162890;
 
     // Game data
     GameVariables gameVars;
@@ -82,6 +96,12 @@ private:
     static __int64 __fastcall sub_4CACF0Hook(__int64 a1, int* a2, int a3, int a4, int a5, __int16 a6, float a7, int a8, int a9);
     static __int64 __fastcall sub_6ED70Hook(unsigned __int8* a1, __int64 a2);
     static __int64 __fastcall sub_53EFF0Hook(__int64 a1);
+    static __int64 __fastcall sub_4AB220Hook(__int64 a1);
+    static __int64 __fastcall sub_14410Hook(__int64 a1);
+    static __int64 __fastcall sub_14300Hook(__int64 a1);
+    static __int64 __fastcall sub_6EB70Hook(unsigned int a1, int a2, unsigned int a3);
+    static __int64 __fastcall sub_407980Hook(__int64 a1, __int64 a2, int a3);
+    static __int64 __fastcall sub_162890Hook(__int64 a1, __int16 a2, __int16 a3, __int16 a4);
 };
 
 __int64 __fastcall MGS2FramerateUnlocker::sub_144A0Hook(int a1)
@@ -100,17 +120,24 @@ __int64 __fastcall MGS2FramerateUnlocker::GetTargetFpsHook(int a1)
 
 __int64 __fastcall MGS2FramerateUnlocker::sub_142C0Hook(int a1)
 {
-    return (a1 * Config.targetFramerate + 30) / 60;
+    return (a1 + 4 * a1 + 1) / instance->timeBase;
 }
 
 __int64 __fastcall MGS2FramerateUnlocker::sub_15CDF0Hook(__int64 a1)
 {
     auto result = instance->sub_15CDF0(a1);
-
-    auto v4 = *(__int64*)(a1 + 8);
-    auto v6 = *(float*)(v4 + 20) + 16.0f;
-    auto scale = DEFAULT_FPS / Config.targetFramerate;
-    *(float*)(v4 + 20) = v6 * scale;
+    
+    auto v1 = *(__int64*)(a1 + 32);
+    if ((*(uint8_t*)(*(__int64*)(v1 + 4992) + 68LL) & 2) == 0)
+    {
+        if ((*(__int64*)(v1 + 5104) & 0x100040000000LL) == 0)
+        {
+            auto v4 = *(__int64*)(a1 + 8);
+            auto v6 = *(float*)(v4 + 20) + 16.0f;
+            auto scale = DEFAULT_FPS / Config.targetFramerate;
+            *(float*)(v4 + 20) = v6 - (16.0f * scale);
+        }
+    }
 
     return result;
 }
@@ -137,6 +164,68 @@ __int64 __fastcall MGS2FramerateUnlocker::sub_53EFF0Hook(__int64 a1) // fps cam 
     auto result = instance->sub_53EFF0(a1);
 
     *instance->gameVars.frameScaleFactorB = 1.2f;
+
+    return result;
+}
+
+__int64 __fastcall MGS2FramerateUnlocker::sub_4AB220Hook(__int64 a1) // bandana physics?
+{
+    *instance->gameVars.frameScaleFactorB = DEFAULT_FPS / Config.targetFramerate;
+    *instance->gameVars.frameScaleFactorC = *instance->gameVars.frameScaleFactorB * *instance->gameVars.frameScaleFactorB;
+
+    auto result = instance->sub_4AB220(a1);
+
+    *instance->gameVars.frameScaleFactorB = 1.2f;
+    *instance->gameVars.frameScaleFactorC = *instance->gameVars.frameScaleFactorB * *instance->gameVars.frameScaleFactorB;
+
+    return result;
+}
+
+__int64 __fastcall MGS2FramerateUnlocker::sub_14410Hook(__int64 a1)
+{
+    return 5 * a1 / instance->timeBase;
+}
+
+__int64 __fastcall MGS2FramerateUnlocker::sub_14300Hook(__int64 a1)
+{
+    return (instance->timeBase * a1) / 5;
+}
+
+__int64 __fastcall MGS2FramerateUnlocker::sub_6EB70Hook(unsigned int a1, int a2, unsigned int a3)
+{
+    auto result = instance->sub_6EB70(a1, a2, a3);
+
+    if (result && a2 < 0)
+    {
+        *(float*)(result + 164) = DEFAULT_FPS / Config.targetFramerate;
+    }
+
+    return result;
+}
+
+__int64 __fastcall MGS2FramerateUnlocker::sub_407980Hook(__int64 a1, __int64 a2, int a3) // throw items?
+{
+    *instance->gameVars.frameScaleFactorB = (DEFAULT_FPS / Config.targetFramerate) * 1.2f;
+    *instance->gameVars.frameScaleFactorD = (DEFAULT_FPS / Config.targetFramerate) * 2.5f;
+
+    a3 = (int)(a3 * (DEFAULT_FPS / Config.targetFramerate));
+
+    auto result = instance->sub_407980(a1, a2, a3);
+
+    *instance->gameVars.frameScaleFactorB = 1.2f;
+    *instance->gameVars.frameScaleFactorD = 2.5f;
+
+    return result;
+}
+
+__int64 __fastcall MGS2FramerateUnlocker::sub_162890Hook(__int64 a1, __int16 a2, __int16 a3, __int16 a4)
+{
+    auto result = instance->sub_162890(a1, a2, a3, a4);
+
+    int v6 = a4 * (Config.targetFramerate / 120.0f);
+
+    *(short*)(a1 + 4922) = v6;
+    *(short*)(a1 + 4930) = v6;
 
     return result;
 }
@@ -233,6 +322,9 @@ bool MGS2FramerateUnlocker::InitializeOffsets()
 
         instance->gameVars.frameScaleFactorA = reinterpret_cast<float*>(GameBase + 0x16ED790);
         instance->gameVars.frameScaleFactorB = reinterpret_cast<float*>(GameBase + 0x725314);
+        instance->gameVars.frameScaleFactorC = reinterpret_cast<float*>(GameBase + 0x725318);
+        instance->gameVars.frameScaleFactorD = reinterpret_cast<float*>(GameBase + 0x725508);
+
         break;
     default:
         spdlog::error("Unsupported game version: {:#x}", Config.gameVersion);
@@ -254,9 +346,19 @@ bool MGS2FramerateUnlocker::InitializeOffsets()
     DWORD oldProtect;
     VirtualProtect(instance->gameVars.actorWaitValue, 8, PAGE_READWRITE, &oldProtect);
     VirtualProtect(instance->gameVars.frameScaleFactorB, 4, PAGE_READWRITE, &oldProtect);
+    VirtualProtect(instance->gameVars.frameScaleFactorC, 4, PAGE_READWRITE, &oldProtect);
     VirtualProtect((LPVOID)(GameBase + 0x53F3F3), 2, PAGE_EXECUTE_READWRITE, &oldProtect);
+    VirtualProtect((LPVOID)(GameBase + 0x4AB2EE), 1, PAGE_EXECUTE_READWRITE, &oldProtect);
+    VirtualProtect((LPVOID)(GameBase + 0x16EE43), 1, PAGE_EXECUTE_READWRITE, &oldProtect);
+    //VirtualProtect((LPVOID)(GameBase + 0x407778), 1, PAGE_EXECUTE_READWRITE, &oldProtect);
+    //VirtualProtect((LPVOID)(GameBase + 0x40781b), 1, PAGE_EXECUTE_READWRITE, &oldProtect);
+    //40781b
     *(uint8_t*)(GameBase + 0x53F3F3) = 0x90;
     *(uint8_t*)(GameBase + 0x53F3F4) = 0x90;
+    *(uint8_t*)(GameBase + 0x4AB2EE) = 0x00;
+    *(uint8_t*)(GameBase + 0x16EE43) = 0x00;
+    //*(uint8_t*)(GameBase + 0x407778) = 0x01;
+    //*(uint8_t*)(GameBase + 0x40781b) = 0x00;
     spdlog::info("InitializeOffsets() finished.");
     return true;
 }
@@ -292,12 +394,17 @@ bool MGS2FramerateUnlocker::InstallHooks()
     //MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0xC780), Is50HzHook, reinterpret_cast<void**>(&Is50Hz));
     MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x144A0), sub_144A0Hook, reinterpret_cast<void**>(&sub_144A0));
     MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x143F0), GetTargetFpsHook, reinterpret_cast<void**>(&GetTargetFps));
-    MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x142C0), sub_142C0Hook, reinterpret_cast<void**>(&sub_142C0));
+    //MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x142C0), sub_142C0Hook, reinterpret_cast<void**>(&sub_142C0));
     MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x15CDF0), sub_15CDF0Hook, reinterpret_cast<void**>(&sub_15CDF0));
     MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x4CACF0), sub_4CACF0Hook, reinterpret_cast<void**>(&sub_4CACF0));
     MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x6ED70), sub_6ED70Hook, reinterpret_cast<void**>(&sub_6ED70));
     MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x53EFF0), sub_53EFF0Hook, reinterpret_cast<void**>(&sub_53EFF0));
-
+    MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x4AB220), sub_4AB220Hook, reinterpret_cast<void**>(&sub_4AB220));
+    MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x14410), sub_14410Hook, reinterpret_cast<void**>(&sub_14410));
+    MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x14300), sub_14300Hook, reinterpret_cast<void**>(&sub_14300));
+    MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x6EB70), sub_6EB70Hook, reinterpret_cast<void**>(&sub_6EB70));
+    MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x407980), sub_407980Hook, reinterpret_cast<void**>(&sub_407980));
+    MH_CreateHook((LPVOID)((uintptr_t)GameModule + 0x162890), sub_162890Hook, reinterpret_cast<void**>(&sub_162890));
 
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK)
     {
