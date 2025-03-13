@@ -83,72 +83,49 @@ MGS3FramerateUnlocker::~MGS3FramerateUnlocker()
     instance = nullptr;
 }
 
+uintptr_t GetRelativeOffset(uint8_t* addr)
+{
+    return reinterpret_cast<uintptr_t>(addr) + 4 + *reinterpret_cast<int32_t*>(addr);
+}
+
 bool MGS3FramerateUnlocker::InitializeOffsets()
 {
     spdlog::info("Initializing offsets...");
-
+    
+    uint8_t* addr = nullptr;
     memset(&gameVars, 0, sizeof(GameVariables));
 
+    addr = Memory::PatternScan(GameModule, "33 C9 83 F8 01 ?? ?? C1 83 C1 05");
+    if (!addr) spdlog::error("Could not find GV_TimeBase");
+    else gameVars.timeBase = GetRelativeOffset(addr + 13);
+
+    addr = Memory::PatternScan(GameModule, "83 3D ?? ?? ?? ?? 00 ?? ?? F2 0F 10 0D");
+    if (!addr) spdlog::error("Could not find ActorWaitValue");
+    else gameVars.actorWaitValue = GetRelativeOffset(addr + 13);
+
+    addr = Memory::PatternScan(GameModule, "89 05 ?? ?? ?? ?? B1 65 E8 ?? ?? ?? FF 8B 0D");
+    if (!addr) spdlog::error("Could not find CutsceneFlag");
+    else gameVars.cutsceneFlag = GetRelativeOffset(addr + 2);
+
+    addr = Memory::PatternScan(GameModule, "0F 28 F0 E8 ?? ?? ?? ?? F3 0F 10 0D ?? ?? ?? ??");
+    if (!addr) spdlog::error("Could not find CameraSpeedModifierA");
+    else gameVars.cameraSpeedModifierA = GetRelativeOffset(addr + 12);
+
+    addr = Memory::PatternScan(GameModule, "0F 28 ?? F3 0F 10 87 90 00 00 00 F3 0F 10 15");
+    if (!addr) spdlog::error("Could not find CameraSpeedModifierB");
+    else gameVars.cameraSpeedModifierB = GetRelativeOffset(addr + 15);
+
+    addr = Memory::PatternScan(GameModule, "0F 6E C0 0F 5B C0 F3 0F 59 05 ?? ?? ?? ?? F3 48 0F 2C C0", 1);
+    if (!addr) spdlog::error("Could not find RealTimeRate");
+    else gameVars.realTimeRate = GetRelativeOffset(addr + 10);
+
+    // set offsets manually here (useful for development)
     switch (Config.gameVersion) 
     {
-    case 0x1000200000000:
-        gameVars.timeBase = reinterpret_cast<int*>(GameBase + 0x1D8D8B0);
-        gameVars.actorWaitValue = reinterpret_cast<double*>(GameBase + 0x8EBF40);
-        gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0x1E41570);
-        gameVars.cameraSpeedModifierA = reinterpret_cast<float*>(GameBase + 0x8EC2C4);
-        gameVars.cameraSpeedModifierB = reinterpret_cast<float*>(GameBase + 0x910BCC);
-        gameVars.realTimeRate = reinterpret_cast<float*>(GameBase + 0x8F18E0);
-        break;
-    case 0x1000300000000:
-        gameVars.timeBase = reinterpret_cast<int*>(GameBase + 0x1D8E8A0);
-        gameVars.actorWaitValue = reinterpret_cast<double*>(GameBase + 0x8EBF48);
-        gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0x1E42570);
-        gameVars.cameraSpeedModifierA = reinterpret_cast<float*>(GameBase + 0x8EC2CC);
-        gameVars.cameraSpeedModifierB = reinterpret_cast<float*>(GameBase + 0x910F80);
-        gameVars.realTimeRate = reinterpret_cast<float*>(GameBase + 0x8F18E0);
-        break;
-    case 0x1000400000000:
-        gameVars.timeBase = reinterpret_cast<int*>(GameBase + 0x1D97D10);
-        gameVars.actorWaitValue = reinterpret_cast<double*>(GameBase + 0x8F2DE8);
-        gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0x1E4BA30);
-        gameVars.cameraSpeedModifierA = reinterpret_cast<float*>(GameBase + 0x8F24B4);
-        gameVars.cameraSpeedModifierB = reinterpret_cast<float*>(GameBase + 0x9186A0);
-        gameVars.realTimeRate = reinterpret_cast<float*>(GameBase + 0x8F90A0);
-        break;
-    case 0x1000500010000:
-        gameVars.timeBase = reinterpret_cast<int*>(GameBase + 0x1D49090);
-        gameVars.actorWaitValue = reinterpret_cast<double*>(GameBase + 0x8A09A8);
-        gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0x1DFCE90);
-        gameVars.cameraSpeedModifierA = reinterpret_cast<float*>(GameBase + 0x8A0074);
-        gameVars.cameraSpeedModifierB = reinterpret_cast<float*>(GameBase + 0x8C8AD0);
-        gameVars.realTimeRate = reinterpret_cast<float*>(GameBase + 0x8A91F0);
-        break;
-    case 0x2000000000000:
-        gameVars.timeBase = reinterpret_cast<int*>(GameBase + 0x1D77740);
-        gameVars.actorWaitValue = reinterpret_cast<double*>(GameBase + 0x8B7C08);
-        gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0x1E2B510);
-        gameVars.cameraSpeedModifierA = reinterpret_cast<float*>(GameBase + 0x8B71C0);
-        gameVars.cameraSpeedModifierB = reinterpret_cast<float*>(GameBase + 0x8F041C);
-        gameVars.realTimeRate = reinterpret_cast<float*>(GameBase + 0x8D0F70);
-        break;
     case 0x2000000010000:
-        gameVars.timeBase = reinterpret_cast<int*>(GameBase + 0x1D77740);
-        gameVars.actorWaitValue = reinterpret_cast<double*>(GameBase + 0x8B7C08);
-        gameVars.cutsceneFlag = reinterpret_cast<int*>(GameBase + 0x1E2B530);
-        gameVars.cameraSpeedModifierA = reinterpret_cast<float*>(GameBase + 0x8B71C0);
-        gameVars.cameraSpeedModifierB = reinterpret_cast<float*>(GameBase + 0x8F0790);
-        gameVars.realTimeRate = reinterpret_cast<float*>(GameBase + 0x8D0F70);
         break;
     default:
-        spdlog::error("Unsupported game version: {:#x}", Config.gameVersion);
-        return false;
-    }
-
-    if (!gameVars.timeBase || !gameVars.actorWaitValue || !gameVars.cameraSpeedModifierA ||
-        !gameVars.cameraSpeedModifierB || !gameVars.realTimeRate) 
-    {
-        spdlog::error("Failed to initialize one or more critical offsets");
-        return false;
+        break;
     }
 
     spdlog::debug("timeBase = {:#x}", reinterpret_cast<uintptr_t>(gameVars.timeBase) - GameBase);
@@ -158,6 +135,13 @@ bool MGS3FramerateUnlocker::InitializeOffsets()
     spdlog::debug("cameraSpeedModifierB = {:#x}", reinterpret_cast<uintptr_t>(gameVars.cameraSpeedModifierB) - GameBase);
     spdlog::debug("realTimeRate = {:#x}", reinterpret_cast<uintptr_t>(gameVars.realTimeRate) - GameBase);
 
+    if (!gameVars.timeBase || !gameVars.actorWaitValue || !gameVars.cameraSpeedModifierA ||
+        !gameVars.cameraSpeedModifierB || !gameVars.realTimeRate) 
+    {
+        spdlog::error("Failed to initialize one or more critical offsets");
+        return false;
+    }
+    
     DWORD oldProtect;
     VirtualProtect(gameVars.actorWaitValue, 8, PAGE_READWRITE, &oldProtect);
     VirtualProtect(gameVars.cameraSpeedModifierA, 4, PAGE_READWRITE, &oldProtect);
@@ -303,6 +287,12 @@ void MGS3FramerateUnlocker::RunUpdateLoop()
 bool MGS3FramerateUnlocker::Initialize()
 {
     spdlog::info("Initializing framerate unlocker...");
+
+    if (Config.gameVersion < 0x1000200000000)
+    {
+        spdlog::error("Unsupported game version: {:#x}. Version 1.2 or higher is required.", Config.gameVersion);
+        return;
+    }
 
     if (!InitializeOffsets())
     {
