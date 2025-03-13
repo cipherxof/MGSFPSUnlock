@@ -30,7 +30,7 @@ uintptr_t Memory::PatternScanBasic(uintptr_t beg, uintptr_t end, uint8_t* str, u
 
 // CSGOSimple's pattern scan
 // https://github.com/OneshotGH/CSGOSimple-master/blob/master/CSGOSimple/helpers/utils.cpp
-uint8_t* Memory::PatternScan(void* module, const char* signature)
+uint8_t* Memory::PatternScan(void* module, const char* signature, int skip = 0, bool end = false)
 {
     static auto pattern_to_byte = [](const char* pattern) {
         auto bytes = std::vector<int>{};
@@ -60,6 +60,7 @@ uint8_t* Memory::PatternScan(void* module, const char* signature)
 
     auto s = patternBytes.size();
     auto d = patternBytes.data();
+    int foundCount = 0;
 
     for (auto i = 0ul; i < sizeOfImage - s; ++i) {
         bool found = true;
@@ -70,7 +71,10 @@ uint8_t* Memory::PatternScan(void* module, const char* signature)
             }
         }
         if (found) {
-            return &scanBytes[i];
+            foundCount++;
+            if (foundCount > skip) {
+                return end ? &scanBytes[i] + s : &scanBytes[i];
+            }
         }
     }
     return nullptr;
