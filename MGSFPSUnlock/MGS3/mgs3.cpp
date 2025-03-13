@@ -103,7 +103,6 @@ bool MGS3FramerateUnlocker::InitializeOffsets()
     if (!addr) spdlog::error("Could not find ActorWaitValue");
     else gameVars.actorWaitValue = GetRelativeOffset(addr + 13);
 
-    // 89 05 1B AB B6 01 B1 65 E8 A4 46 DE FF 8B 0D 12 AB
     addr = Memory::PatternScan(GameModule, "89 05 ?? ?? ?? ?? B1 65 E8 ?? ?? ?? FF 8B 0D");
     if (!addr) spdlog::error("Could not find CutsceneFlag");
     else gameVars.cutsceneFlag = GetRelativeOffset(addr + 2);
@@ -135,7 +134,6 @@ bool MGS3FramerateUnlocker::InitializeOffsets()
     spdlog::debug("cameraSpeedModifierA = {:#x}", reinterpret_cast<uintptr_t>(gameVars.cameraSpeedModifierA) - GameBase);
     spdlog::debug("cameraSpeedModifierB = {:#x}", reinterpret_cast<uintptr_t>(gameVars.cameraSpeedModifierB) - GameBase);
     spdlog::debug("realTimeRate = {:#x}", reinterpret_cast<uintptr_t>(gameVars.realTimeRate) - GameBase);
-
 
     if (!gameVars.timeBase || !gameVars.actorWaitValue || !gameVars.cameraSpeedModifierA ||
         !gameVars.cameraSpeedModifierB || !gameVars.realTimeRate) 
