@@ -30,7 +30,7 @@ uintptr_t Memory::PatternScanBasic(uintptr_t beg, uintptr_t end, uint8_t* str, u
 
 // CSGOSimple's pattern scan
 // https://github.com/OneshotGH/CSGOSimple-master/blob/master/CSGOSimple/helpers/utils.cpp
-uint8_t* Memory::PatternScan(void* module, const char* signature, int skip = 0, bool end = false)
+uint8_t* Memory::PatternScan(void* module, const char* signature, int skip, bool end)
 {
     static auto pattern_to_byte = [](const char* pattern) {
         auto bytes = std::vector<int>{};
