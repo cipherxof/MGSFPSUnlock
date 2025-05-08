@@ -15,6 +15,7 @@ std::shared_ptr<spdlog::logger> logger;
 std::string sLogFile = "MGSFPSUnlock.log";
 std::string sFixVer = "0.0.6";
 std::filesystem::path sExePath;
+std::string sFixPath;
 
 GameConfig Config;
 HMODULE GameModule = GetModuleHandleA(NULL);
@@ -23,8 +24,18 @@ mINI::INIStructure ConfigValues;
 
 void ReadConfig()
 {
-    mINI::INIFile ini("MGSFPSUnlock.ini");
-    ini.read(ConfigValues);
+    std::string configPath = sExePath.string() + sFixPath + "MGSFPSUnlock.ini";
+    mINI::INIFile ini(configPath);
+    if (!ini.read(ConfigValues)) {
+        ConfigValues["Settings"]["TargetFrameRate"] = "60";
+        ini.generate(ConfigValues);
+        spdlog::info("Config file not detected! Generating a new one at: {}", configPath);
+    }
+    else {
+        spdlog::info("Config file loaded: {}", configPath);
+    }
+    Config.targetFramerate = std::stoi(ConfigValues["Settings"]["TargetFrameRate"]);
+    spdlog::info("Config Parse: Target Framerate: {}", Config.targetFramerate);
 }
 
 void InitializeLogger()
@@ -35,16 +46,27 @@ void InitializeLogger()
     sExePath = exePath;
     sExePath = sExePath.remove_filename();
 
+    std::string paths[4] = { "", "plugins\\", "scripts\\", "update\\" };
+    for (int i = 0; i < (sizeof(paths) / sizeof(paths[0])); i++) {
+        if (std::filesystem::exists(sExePath.string() + paths[i] + "MGSFPSUnlock.asi")) {
+            sFixPath = paths[i];
+            break;
+        }
+    }
+
     {
         try 
         {
-            logger = spdlog::basic_logger_mt("MGSFPSUnlock", "MGSFPSUnlock.log", true);
+            if (!std::filesystem::is_directory(sExePath.string() + "logs"))
+                std::filesystem::create_directory(sExePath.string() + "logs"); //create a "logs" subdirectory in the game folder to keep the main directory tidy.
+            logger = spdlog::basic_logger_mt("MGSFPSUnlock", sExePath.string() + "logs\\" + sLogFile, true);
             logger->set_level(spdlog::level::debug);
             logger->flush_on(spdlog::level::debug);
             spdlog::set_default_logger(logger);
             spdlog::set_pattern(LOG_FORMAT_PREFIX ": %v");
             spdlog::info("MGSFPSUnlock v{} loaded.", sFixVer.c_str());
-            spdlog::info("Log file: {}", sExePath.string() + sLogFile);
+            spdlog::info("ASI plugin location: {}", sExePath.string() + sFixPath + "MGSFPSUnlock.asi");
+            spdlog::info("Log file: {}", sExePath.string() + "logs\\" + sLogFile);
         }
         catch (const spdlog::spdlog_ex& ex) {
             AllocConsole();
@@ -59,20 +81,17 @@ void InitializeLogger()
 DWORD WINAPI MainThread(LPVOID lpParam)
 {
     InitializeLogger();
-    ReadConfig();
-
-    spdlog::info("Config Loaded");
-    spdlog::info("Target Framerate: {}", ConfigValues["Settings"]["TargetFrameRate"]);
 
     GetGameType(GameModule, Config.gameType);
     Config.gameVersion = GetGameVersion(GameModule);
-    Config.targetFramerate = std::stoi(ConfigValues["Settings"]["TargetFrameRate"]);
-
-    if (Config.gameVersion == 0) 
+    if (Config.gameVersion == 0)
     {
         spdlog::error("Unable to get game version, closing!");
         return false;
     }
+
+    ReadConfig(); //Read the config after checking gameVersion, otherwise any regeneration logs will be cleared when the launcher closes.
+
 
     //convert gameVersion to a string
     std::stringstream stream;
