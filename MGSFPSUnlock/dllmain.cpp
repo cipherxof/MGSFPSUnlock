@@ -26,12 +26,14 @@ void ReadConfig()
 {
     std::string configPath = sExePath.string() + sFixPath + "MGSFPSUnlock.ini";
     mINI::INIFile ini(configPath);
-    if (!ini.read(ConfigValues)) {
+    if (!ini.read(ConfigValues)) 
+    {
         ConfigValues["Settings"]["TargetFrameRate"] = "60";
         ini.generate(ConfigValues);
         spdlog::info("Config file not detected! Generating a new one at: {}", configPath);
     }
-    else {
+    else 
+    {
         spdlog::info("Config file loaded: {}", configPath);
     }
     Config.targetFramerate = std::stoi(ConfigValues["Settings"]["TargetFrameRate"]);
@@ -47,8 +49,10 @@ void InitializeLogger()
     sExePath = sExePath.remove_filename();
 
     std::string paths[4] = { "", "plugins\\", "scripts\\", "update\\" };
-    for (int i = 0; i < (sizeof(paths) / sizeof(paths[0])); i++) {
-        if (std::filesystem::exists(sExePath.string() + paths[i] + "MGSFPSUnlock.asi")) {
+    for (int i = 0; i < (sizeof(paths) / sizeof(paths[0])); i++) 
+    {
+        if (std::filesystem::exists(sExePath.string() + paths[i] + "MGSFPSUnlock.asi")) 
+        {
             sFixPath = paths[i];
             break;
         }
@@ -58,7 +62,9 @@ void InitializeLogger()
         try 
         {
             if (!std::filesystem::is_directory(sExePath.string() + "logs"))
+            {
                 std::filesystem::create_directory(sExePath.string() + "logs"); //create a "logs" subdirectory in the game folder to keep the main directory tidy.
+            }
             logger = spdlog::basic_logger_mt("MGSFPSUnlock", sExePath.string() + "logs\\" + sLogFile, true);
             logger->set_level(spdlog::level::debug);
             logger->flush_on(spdlog::level::debug);
