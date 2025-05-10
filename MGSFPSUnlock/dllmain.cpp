@@ -48,7 +48,7 @@ void InitializeLogger()
     sExePath = exePath;
     sExePath = sExePath.remove_filename();
 
-    std::string paths[4] = { "", "plugins\\", "scripts\\", "update\\" };
+    std::string paths[4] = { "\\", "plugins\\", "scripts\\", "update\\" };
     for (int i = 0; i < (sizeof(paths) / sizeof(paths[0])); i++) 
     {
         if (std::filesystem::exists(sExePath.string() + paths[i] + "MGSFPSUnlock.asi")) 
