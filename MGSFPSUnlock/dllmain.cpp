@@ -12,10 +12,10 @@
 #define LOG_FORMAT_PREFIX "[%Y-%m-%d %H:%M:%S.%e] [MGSFPSUnlock] [%l]"
 
 std::shared_ptr<spdlog::logger> logger;
-std::string sLogFile = "MGSFPSUnlock.log";
+std::filesystem::path sLogFile = "MGSFPSUnlock.log";
 std::string sFixVer = "0.0.6";
 std::filesystem::path sExePath;
-std::string sFixPath;
+std::filesystem::path sFixPath;
 
 GameConfig Config;
 HMODULE GameModule = GetModuleHandleA(NULL);
@@ -24,7 +24,7 @@ mINI::INIStructure ConfigValues;
 
 void ReadConfig()
 {
-    std::string configPath = sExePath.string() + sFixPath + "MGSFPSUnlock.ini";
+    std::string configPath = (sExePath / sFixPath / "MGSFPSUnlock.ini").string();
     mINI::INIFile ini(configPath);
     if (!ini.read(ConfigValues)) 
     {
@@ -48,12 +48,12 @@ void InitializeLogger()
     sExePath = exePath;
     sExePath = sExePath.remove_filename();
 
-    std::string paths[4] = { "", "plugins\\", "scripts\\", "update\\" };
-    for (int i = 0; i < (sizeof(paths) / sizeof(paths[0])); i++) 
+    std::array<std::string, 4> paths = { "", "plugins", "scripts", "update" };
+    for (const auto& path : paths)
     {
-        if (std::filesystem::exists(sExePath.string() + paths[i] + "MGSFPSUnlock.asi")) 
+        if (std::filesystem::exists(sExePath / path / "MGSFPSUnlock.asi")) 
         {
-            sFixPath = paths[i];
+            sFixPath = path;
             break;
         }
     }
@@ -61,18 +61,18 @@ void InitializeLogger()
     {
         try 
         {
-            if (!std::filesystem::is_directory(sExePath.string() + "logs"))
+            if (!std::filesystem::is_directory(sExePath / "logs"))
             {
-                std::filesystem::create_directory(sExePath.string() + "logs"); //create a "logs" subdirectory in the game folder to keep the main directory tidy.
+                std::filesystem::create_directory(sExePath / "logs"); //create a "logs" subdirectory in the game folder to keep the main directory tidy.
             }
-            logger = spdlog::basic_logger_mt("MGSFPSUnlock", sExePath.string() + "logs\\" + sLogFile, true);
+            logger = spdlog::basic_logger_mt("MGSFPSUnlock", (sExePath / "logs" / sLogFile).string(), true);
             logger->set_level(spdlog::level::debug);
             logger->flush_on(spdlog::level::debug);
             spdlog::set_default_logger(logger);
             spdlog::set_pattern(LOG_FORMAT_PREFIX ": %v");
             spdlog::info("MGSFPSUnlock v{} loaded.", sFixVer.c_str());
-            spdlog::info("ASI plugin location: {}", sExePath.string() + sFixPath + "MGSFPSUnlock.asi");
-            spdlog::info("Log file: {}", sExePath.string() + "logs\\" + sLogFile);
+            spdlog::info("ASI plugin location: {}", (sExePath / sFixPath / "MGSFPSUnlock.asi").string());
+            spdlog::info("Log file: {}", (sExePath / "logs" / sLogFile).string());
         }
         catch (const spdlog::spdlog_ex& ex) {
             AllocConsole();
