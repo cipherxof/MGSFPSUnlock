@@ -20,10 +20,7 @@ private:
     static constexpr float DEFAULT_FPS = 60.0f;
 
     // Function delegates
-    typedef __int64 __fastcall ActDashFireDelegate(__int64 a1);
-    typedef __int64 __fastcall CreateDebrisTexDelegate(__int64 a1, float* a2, float* a3, unsigned int a4, int a5, int a6, float a7);
     typedef __int64 __fastcall GetTimeBaseDelegate(struct _exception* a1);
-    typedef __int64 __fastcall CreateFlyingSmokeSlowDelegate(DWORD* a1, __int64 a2, unsigned int a3);
 
     // Game data structure
     struct GameVariables 
@@ -35,9 +32,6 @@ private:
 
     // Original function pointers
     GetTimeBaseDelegate* GetTimeBase;
-    ActDashFireDelegate* ActDashFire;
-    CreateDebrisTexDelegate* CreateDebrisTex;
-    CreateFlyingSmokeSlowDelegate* CreateFlyingSmokeSlow;
 
     // Game data
     GameVariables gameVars;
@@ -50,20 +44,12 @@ private:
     bool InCutscene() const;
     bool InDemoCutscene() const;
 
-    // Private members
-    double dashLastUpdate = 0;
 
     // Hook methods
     static MGS2FramerateUnlocker* instance;
 
-    static __int64 __fastcall ActDashFireHook(__int64 a1);
-    static __int64 __fastcall CreateDebrisTexHook(__int64 a1, float* a2, float* a3, unsigned int a4, int a5, int a6, float a7);
     static __int64 __fastcall GetTimeBaseHook(struct _exception* a1);
-    static __int64 __fastcall CreateFlyingSmokeSlowHook(DWORD* a1, __int64 a2, unsigned int a3);
 };
-
-///Current relative % above 60 FPS, ie 144 FPS = 2.4
-#define actorWaitValueMultiplier ((1.0 / DEFAULT_FPS) / (*instance->gameVars.actorWaitValue))
 
 MGS2FramerateUnlocker* MGS2FramerateUnlocker::instance = nullptr;
 
@@ -87,35 +73,6 @@ bool MGS2FramerateUnlocker::InCutscene() const
 bool MGS2FramerateUnlocker::InDemoCutscene() const
 {
     return gameVars.demoCutsceneFlag == NULL ? false : (*gameVars.demoCutsceneFlag == 1);
-}
-
-__int64 __fastcall MGS2FramerateUnlocker::ActDashFireHook(__int64 a1)
-{   
-    if (!instance->InDemoCutscene()) // only slow down during demo cutscenes. boss fight runs at normal gamespeed.
-        return instance->ActDashFire(a1);
-
-    instance->dashLastUpdate += *instance->gameVars.actorWaitValue;
-
-    if (instance->dashLastUpdate < 1.0 / 30.0)
-        return 0;
-
-    instance->dashLastUpdate = 0;
-
-    return instance->ActDashFire(a1);
-}
-
-__int64 __fastcall MGS2FramerateUnlocker::CreateDebrisTexHook(__int64 a1, float* a2, float* a3, unsigned int a4, int a5, int a6, float a7)
-{
-    auto result = instance->CreateDebrisTex(a1, a2, a3, a4, a5, a6, a7);
-
-    *(int*)(a1 + 100) = (150 * actorWaitValueMultiplier);
-
-    return result;
-}
-
-__int64 __fastcall MGS2FramerateUnlocker::CreateFlyingSmokeSlowHook(DWORD* a1, __int64 a2, unsigned int a3)
-{
-    return instance->CreateFlyingSmokeSlow(a1, a2, ((a3 * (instance->InCutscene() ? 2 : 1)) * actorWaitValueMultiplier));
 }
 
 __int64 __fastcall MGS2FramerateUnlocker::GetTimeBaseHook(struct _exception* a1)
@@ -195,25 +152,16 @@ bool MGS2FramerateUnlocker::InstallHooks()
     }
 
     uint8_t* getTimeBaseOffset = Memory::PatternScan(GameModule, "48 83 EC 28 E8 ?? ?? ?? ?? 33 C9 83 F8 01 0F 94");
-    uint8_t* actDashFireOffset = Memory::PatternScan(GameModule, "?? ?? ?? ?? ?? 49 8D AB 68 FE FF FF 48 81 EC 88");
-    uint8_t* createDebrisTexOffset = Memory::PatternScan(GameModule, "40 55 53 56 57 41 54 41 56 41 57 48 8D AC 24 00");
-    uint8_t* createFlyingSmokeSlowOffset = Memory::PatternScan(GameModule, "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 41 56 41 57 48 83 EC ?? 45 33 C9 41 8B F8");
 
-    if (!actDashFireOffset || !createDebrisTexOffset || !getTimeBaseOffset || !createFlyingSmokeSlowOffset)
+    if (!getTimeBaseOffset)
     {
         spdlog::error("Failed to find one or more function patterns");
         return false;
     }
 
     spdlog::debug("getTimeBaseOffset = {:#x}", reinterpret_cast<uintptr_t>(getTimeBaseOffset) - reinterpret_cast<uintptr_t>(GameModule));
-    spdlog::debug("actDashFireOffset = {:#x}", reinterpret_cast<uintptr_t>(actDashFireOffset) - reinterpret_cast<uintptr_t>(GameModule));
-    spdlog::debug("createDebrisTexOffset = {:#x}", reinterpret_cast<uintptr_t>(createDebrisTexOffset) - reinterpret_cast<uintptr_t>(GameModule));
-    spdlog::debug("createFlyingSmokeSlowOffset = {:#x}", reinterpret_cast<uintptr_t>(createFlyingSmokeSlowOffset) - reinterpret_cast<uintptr_t>(GameModule));
 
     MH_CreateHook(getTimeBaseOffset, GetTimeBaseHook, reinterpret_cast<void**>(&GetTimeBase));
-    MH_CreateHook(createDebrisTexOffset, CreateDebrisTexHook, reinterpret_cast<void**>(&CreateDebrisTex));
-    MH_CreateHook(createFlyingSmokeSlowOffset, CreateFlyingSmokeSlowHook, reinterpret_cast<void**>(&CreateFlyingSmokeSlow));
-    MH_CreateHook(actDashFireOffset, ActDashFireHook, reinterpret_cast<void**>(&ActDashFire));
 
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK)
     {
