@@ -45,16 +45,27 @@ void InitializeLogger()
     // Get game name and exe path
     WCHAR exePath[_MAX_PATH] = { 0 };
     GetModuleFileNameW(GameModule, exePath, MAX_PATH);
-    sExePath = exePath;
-    sExePath = sExePath.remove_filename();
-
+    sExePath = std::filesystem::path(exePath).remove_filename();
+    bool bFoundOnce = false;
     std::array<std::string, 4> paths = { "", "plugins", "scripts", "update" };
     for (const auto& path : paths)
     {
-        if (std::filesystem::exists(sExePath / path / "MGSFPSUnlock.asi")) 
+        auto filePath = sExePath / path / "MGSFPSUnlock.asi";
+        if (std::filesystem::exists(filePath))
         {
+            if (bFoundOnce) //multiple versions found
+            {
+                AllocConsole();
+                FILE* dummy;
+                freopen_s(&dummy, "CONOUT$", "w", stdout);
+                std::string errorMessage = "DUPLICATE FILE ERROR: Duplicate MGSFPSUnlock.asi installations found! Please make sure to delete any old versions!\n";
+                errorMessage.append("DUPLICATE FILE ERROR - Installation 1: ").append((sExePath / sFixPath / "MGSFPSUnlock.asi").string().append("\n"));
+                errorMessage.append("DUPLICATE FILE ERROR - Installation 2: ").append(filePath.string());
+                std::cout << errorMessage << std::endl;
+                return FreeLibraryAndExitThread(GameModule, 1);
+            }
+            bFoundOnce = true;
             sFixPath = path;
-            break;
         }
     }
 
