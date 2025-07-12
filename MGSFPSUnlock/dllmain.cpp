@@ -1,6 +1,5 @@
 #include "stdafx.h"
 #include "Memory.h"
-#include "MinHook.h"
 #include "Utils.h"
 #include "ini.h"
 #include "config.h"
