@@ -4,9 +4,13 @@ This is an experimental mod that allows you to play Metal Gear Solid 3 at framer
 ## How to use
 
 1. Download `MGSFPSUnlock.zip` from the [releases](https://github.com/cipherxof/MGSFPSUnlock/releases) page
-2. Extract to your MGS3 install location (i.e `C:\Program Files (x86)\Steam\steamapps\common\MGS3`)
+2. Extract to your MGS2/MGS3 install location (i.e `C:\Program Files (x86)\Steam\steamapps\common\MGS3`)
 3. Edit `MGSFPSUnlock.ini` and choose your target framerate.
 4. Install [MGSHDFix](https://github.com/Lyall/MGSHDFix) and enable Borderless Windowed mode (this shouldn't be required in the future)
+
+## Steam Deck/Linux Additional Instructions
+🚩**You do not need to do this if you are using Windows!**
+- Open up the game properties of MGS2/MGS3 in Steam and add `WINEDLLOVERRIDES="wininet,winhttp=n,b" %command%` to the launch options.
 
 ## Todo
 - [x] MGS3 Support
@@ -16,9 +20,8 @@ This is an experimental mod that allows you to play Metal Gear Solid 3 at framer
 ## Building
 
 ```bash
-git clone https://github.com/cipherxof/MGSFPSUnlock.git
+git clone --recursive https://github.com/cipherxof/MGSFPSUnlock.git
 cd MGSFPSUnlock
-git submodule update --init
 ```
 
 ### Windows
