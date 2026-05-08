@@ -151,7 +151,7 @@ bool MGS3FramerateUnlocker::InitializeOffsets()
     spdlog::debug("cameraSpeedModifierB = {:#x}", reinterpret_cast<uintptr_t>(gameVars.cameraSpeedModifierB) - GameBase);
     spdlog::debug("realTimeRate = {:#x}", reinterpret_cast<uintptr_t>(gameVars.realTimeRate) - GameBase);
 
-    if (!gameVars.timeBase || !gameVars.actorWaitValue || !gameVars.cameraSpeedModifierA ||
+    if (!gameVars.timeBase || !gameVars.actorWaitValue || !gameVars.cutsceneFlag || !gameVars.cameraSpeedModifierA ||
         !gameVars.cameraSpeedModifierB || !gameVars.realTimeRate) 
     {
         spdlog::error("Failed to initialize one or more critical offsets");
@@ -203,13 +203,6 @@ bool MGS3FramerateUnlocker::InstallHooks()
     uint8_t* convertTo60 = Memory::PatternScan(GameModule, "40 53 48 83 EC ?? 48 63 D9 E8 ?? ?? ?? ?? 85 C0 74 ?? 48 8D 0C 5B");
     uint8_t* setTitleScreenPlaybackSpeed = Memory::PatternScan(GameModule, "48 8B C1 48 C1 E0 ?? 48 85 C9 74 ?? 48 39 48 ?? 75 ? F3 0F 11 88 ?? ?? ?? ?? C3");
 
-    if (!getTimeBase || !updateMotionA || !updateMotionB ||
-        !getTargetFps || !throwItem || !animBlend || !getActorExecTime)
-    {
-        spdlog::error("Failed to find one or more function patterns");
-        return false;
-    }
-
     spdlog::debug("getTimeBase = {:#x}", reinterpret_cast<uintptr_t>(getTimeBase) - reinterpret_cast<uintptr_t>(GameModule));
     spdlog::debug("updateMotionA = {:#x}", reinterpret_cast<uintptr_t>(updateMotionA) - reinterpret_cast<uintptr_t>(GameModule));
     spdlog::debug("updateMotionB = {:#x}", reinterpret_cast<uintptr_t>(updateMotionB) - reinterpret_cast<uintptr_t>(GameModule));
@@ -225,6 +218,14 @@ bool MGS3FramerateUnlocker::InstallHooks()
     spdlog::debug("adjustTick9 = {:#x}", reinterpret_cast<uintptr_t>(adjustTick9) - reinterpret_cast<uintptr_t>(GameModule));
     spdlog::debug("convertFrom60 = {:#x}", reinterpret_cast<uintptr_t>(convertFrom60) - reinterpret_cast<uintptr_t>(GameModule));
     spdlog::debug("convertTo60 = {:#x}", reinterpret_cast<uintptr_t>(convertTo60) - reinterpret_cast<uintptr_t>(GameModule));
+
+    if (!getTimeBase || !updateMotionA || !updateMotionB || !getTargetFps || !throwItem || !animBlend || !getActorExecTime ||
+        !adjustTick || !adjustTick2 || !adjustTick3 || !adjustTick5 || !adjustTick8 || !adjustTick9 || !convertFrom60 || !convertTo60 ||
+        !setTitleScreenPlaybackSpeed)
+    {
+        spdlog::error("Failed to find one or more function patterns");
+        return false;
+    }
 
     MH_CreateHook(getTimeBase, GetTimeBaseHook, reinterpret_cast<void**>(&GetTimeBase));
     MH_CreateHook(updateMotionA, UpdateMotionTimeBaseAHook, reinterpret_cast<void**>(&UpdateMotionTimeBaseA));
