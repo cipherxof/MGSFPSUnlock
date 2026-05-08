@@ -27,6 +27,7 @@ private:
     typedef int64_t(__fastcall* ThrowItemDelegate)(uint64_t a1, int* a2, float* a3, int a4, uint16_t a5, int a6, int a7, int a8, struct _exception* a9, int a10);
     typedef int16_t(__fastcall* UpdateAnimationBlendingDelegate)(struct _exception* a1, int16_t a2);
     typedef double(*GetActorExecTimeDelegate)();
+    typedef __int64(__fastcall* AdjustTickDelegate)(struct _exception* a1);
 
     // Game data structure
     struct GameVariables 
@@ -47,11 +48,18 @@ private:
     ThrowItemDelegate ThrowItem;
     UpdateAnimationBlendingDelegate UpdateAnimationBlending;
     GetActorExecTimeDelegate GetActorExecTime;
+    AdjustTickDelegate AdjustTick;
+    AdjustTickDelegate AdjustTick2;
+    AdjustTickDelegate AdjustTick3;
+    AdjustTickDelegate AdjustTick5;
+    AdjustTickDelegate ConvertFrom60;
+    AdjustTickDelegate ConvertTo60;
 
     // Game data
     GameVariables gameVars;
     float frameRateModifier;
     int timeBase;
+    float timeBaseFloat = (float)DEFAULT_TIMEBASE;
     double execTime = 0.00;
 
     // Private methods
@@ -68,6 +76,13 @@ private:
     static int64_t __fastcall ThrowItemHook(uint64_t a1, int* a2, float* a3, int a4, uint16_t a5, int a6, int a7, int a8, struct _exception* a9, int a10);
     static int16_t __fastcall UpdateAnimationBlendingHook(int16_t currentFrame, int16_t targetFrame);
     static double GetActorExecTimeHook();
+    static __int64 __fastcall AdjustTickHook(struct _exception* a1);
+    static __int64 __fastcall AdjustTick2Hook(struct _exception* a1);
+    static float __fastcall AdjustTick3Hook(float tick);
+    static float __fastcall AdjustTick5Hook(float tick);
+    static __int64 __fastcall ConvertFrom60Hook(struct _exception* a1);
+    static __int64 __fastcall ConvertTo60Hook(struct _exception* a1);
+    static __int64 __fastcall SetTitleScreenPlaybackSpeed_Hook(__int64 a1, float a2);
 };
 
 MGS3FramerateUnlocker* MGS3FramerateUnlocker::instance = nullptr;
@@ -104,7 +119,7 @@ bool MGS3FramerateUnlocker::InitializeOffsets()
     if (!addr) spdlog::error("Could not find ActorWaitValue");
     else gameVars.actorWaitValue = reinterpret_cast<double*>(GetRelativeOffset(addr + 13));
 
-    addr = Memory::PatternScan(GameModule, "89 05 ?? ?? ?? ?? B1 65 E8 ?? ?? ?? FF 8B 0D");
+    addr = Memory::PatternScan(GameModule, "89 2D ?? ?? ?? ?? 89 2D ?? ?? ?? ?? C7 05 ?? ?? ?? ?? ?? ?? ?? ?? 40 88 2D");
     if (!addr) spdlog::error("Could not find CutsceneFlag");
     else gameVars.cutsceneFlag = reinterpret_cast<int*>(GetRelativeOffset(addr + 2));
 
@@ -152,6 +167,14 @@ bool MGS3FramerateUnlocker::InitializeOffsets()
     return true;
 }
 
+typedef __int64 __fastcall SetTitleScreenPlaybackSpeed_t(__int64 a1, float a2);
+SetTitleScreenPlaybackSpeed_t* SetTitleScreenPlaybackSpeed;
+__int64 __fastcall MGS3FramerateUnlocker::SetTitleScreenPlaybackSpeed_Hook(__int64 a1, float a2)
+{
+    float scaled = a2 / instance->frameRateModifier;
+    return SetTitleScreenPlaybackSpeed(a1, scaled);
+}
+
 bool MGS3FramerateUnlocker::InstallHooks()
 {
     spdlog::info("Installing hooks");
@@ -163,37 +186,61 @@ bool MGS3FramerateUnlocker::InstallHooks()
         return false;
     }
 
-    uint8_t* getTimeBaseAddr = Memory::PatternScan(GameModule, "48 83 EC 28 E8 ?? ?? FD FF 33 C9 83 F8 01 0F 94");
-    uint8_t* updateMotionAAddr = Memory::PatternScan(GameModule, "48 85 C9 74 31 0F 57 C0 0F 2F C1 76 0B 66 0F 6E");
-    uint8_t* updateMotionBAddr = Memory::PatternScan(GameModule, "48 85 C9 74 3F 0F 57 C0 0F 2F C1 76 0B 66 0F 6E");
-    uint8_t* getTargetFpsAddr = Memory::PatternScan(GameModule, "48 83 EC 28 E8 ?? ?? FD FF 83 F8 01 B9 3C 00 00");
-    uint8_t* throwItemAddr = Memory::PatternScan(GameModule, "40 55 56 57 41 56 41 57 48 8D 6C 24 E0 48 81 EC");
-    uint8_t* animBlendAddr = Memory::PatternScan(GameModule, "48 89 5C 24 08 57 48 83 EC 30 0F 29 74 24 20 0F");
+    uint8_t* getTimeBase = Memory::PatternScan(GameModule, "48 83 EC 28 E8 ?? ?? FD FF 33 C9 83 F8 01 0F 94");
+    uint8_t* updateMotionA = Memory::PatternScan(GameModule, "48 85 C9 74 31 0F 57 C0 0F 2F C1 76 0B 66 0F 6E");
+    uint8_t* updateMotionB = Memory::PatternScan(GameModule, "48 85 C9 74 3F 0F 57 C0 0F 2F C1 76 0B 66 0F 6E");
+    uint8_t* getTargetFps = Memory::PatternScan(GameModule, "48 83 EC 28 E8 ?? ?? FD FF 83 F8 01 B9 3C 00 00");
+    uint8_t* throwItem = Memory::PatternScan(GameModule, "40 55 56 57 41 56 41 57 48 8D 6C 24 E0 48 81 EC");
+    uint8_t* animBlend = Memory::PatternScan(GameModule, "48 89 5C 24 08 57 48 83 EC 30 0F 29 74 24 20 0F");
     uint8_t* getActorExecTime = Memory::PatternScan(GameModule, "48 83 EC 28 48 8D 0D ?? ?? ?? 01 FF 15 ?? ?? 78");
+    uint8_t* adjustTick = Memory::PatternScan(GameModule, "40 53 48 83 EC ?? 8B D9 E8 ?? ?? ?? ?? 83 F8 ?? 75 ?? 8D 0C 9D");
+    uint8_t* adjustTick2 = Memory::PatternScan(GameModule, "40 53 48 83 EC ?? 8B D9 E8 ?? ?? ?? ?? 83 F8 ?? 75 ?? 8D 0C 5B");
+    uint8_t* adjustTick3 = Memory::PatternScan(GameModule, "48 83 EC ?? 0F 29 74 24 ?? 0F");
+    uint8_t* adjustTick5 = Memory::PatternScan(GameModule, "48 83 EC ?? 0F 29 74 24 ?? 0F", 1);
+    uint8_t* adjustTick8 = Memory::PatternScan(GameModule, "48 83 EC ?? 0F 29 74 24 ?? 0F", 2);
+    uint8_t* adjustTick9 = Memory::PatternScan(GameModule, "48 83 EC ?? 0F 29 74 24 ?? 0F", 3);
+    uint8_t* convertFrom60 = Memory::PatternScan(GameModule, "40 53 48 83 EC ?? 48 63 D9 E8 ?? ?? ?? ?? 85 C0 74 ?? 48 8D 0C 9B");
+    uint8_t* convertTo60 = Memory::PatternScan(GameModule, "40 53 48 83 EC ?? 48 63 D9 E8 ?? ?? ?? ?? 85 C0 74 ?? 48 8D 0C 5B");
+    uint8_t* setTitleScreenPlaybackSpeed = Memory::PatternScan(GameModule, "48 8B C1 48 C1 E0 ?? 48 85 C9 74 ?? 48 39 48 ?? 75 ? F3 0F 11 88 ?? ?? ?? ?? C3");
 
-    if (!getTimeBaseAddr || !updateMotionAAddr || !updateMotionBAddr ||
-        !getTargetFpsAddr || !throwItemAddr || !animBlendAddr || !getActorExecTime)
+    if (!getTimeBase || !updateMotionA || !updateMotionB ||
+        !getTargetFps || !throwItem || !animBlend || !getActorExecTime)
     {
         spdlog::error("Failed to find one or more function patterns");
         return false;
     }
 
-    spdlog::debug("getTimeBase = {:#x}", reinterpret_cast<uintptr_t>(getTimeBaseAddr) - reinterpret_cast<uintptr_t>(GameModule));
-    spdlog::debug("updateMotionA = {:#x}", reinterpret_cast<uintptr_t>(updateMotionAAddr) - reinterpret_cast<uintptr_t>(GameModule));
-    spdlog::debug("updateMotionB = {:#x}", reinterpret_cast<uintptr_t>(updateMotionBAddr) - reinterpret_cast<uintptr_t>(GameModule));
-    spdlog::debug("getTargetFps = {:#x}", reinterpret_cast<uintptr_t>(getTargetFpsAddr) - reinterpret_cast<uintptr_t>(GameModule));
-    spdlog::debug("throwItem = {:#x}", reinterpret_cast<uintptr_t>(throwItemAddr) - reinterpret_cast<uintptr_t>(GameModule));
-    spdlog::debug("animBlend = {:#x}", reinterpret_cast<uintptr_t>(animBlendAddr) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("getTimeBase = {:#x}", reinterpret_cast<uintptr_t>(getTimeBase) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("updateMotionA = {:#x}", reinterpret_cast<uintptr_t>(updateMotionA) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("updateMotionB = {:#x}", reinterpret_cast<uintptr_t>(updateMotionB) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("getTargetFps = {:#x}", reinterpret_cast<uintptr_t>(getTargetFps) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("throwItem = {:#x}", reinterpret_cast<uintptr_t>(throwItem) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("animBlend = {:#x}", reinterpret_cast<uintptr_t>(animBlend) - reinterpret_cast<uintptr_t>(GameModule));
     spdlog::debug("getActorExecTime = {:#x}", reinterpret_cast<uintptr_t>(getActorExecTime) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("adjustTick = {:#x}", reinterpret_cast<uintptr_t>(adjustTick) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("adjustTick2 = {:#x}", reinterpret_cast<uintptr_t>(adjustTick2) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("adjustTick3 = {:#x}", reinterpret_cast<uintptr_t>(adjustTick3) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("adjustTick5 = {:#x}", reinterpret_cast<uintptr_t>(adjustTick5) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("adjustTick8 = {:#x}", reinterpret_cast<uintptr_t>(adjustTick8) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("adjustTick9 = {:#x}", reinterpret_cast<uintptr_t>(adjustTick9) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("convertFrom60 = {:#x}", reinterpret_cast<uintptr_t>(convertFrom60) - reinterpret_cast<uintptr_t>(GameModule));
+    spdlog::debug("convertTo60 = {:#x}", reinterpret_cast<uintptr_t>(convertTo60) - reinterpret_cast<uintptr_t>(GameModule));
 
-    MH_CreateHook(getTimeBaseAddr, GetTimeBaseHook, reinterpret_cast<void**>(&GetTimeBase));
-    MH_CreateHook(updateMotionAAddr, UpdateMotionTimeBaseAHook, reinterpret_cast<void**>(&UpdateMotionTimeBaseA));
-    MH_CreateHook(updateMotionBAddr, UpdateMotionTimeBaseBHook, reinterpret_cast<void**>(&UpdateMotionTimeBaseB));
-    MH_CreateHook(getTargetFpsAddr, GetTargetFpsHook, reinterpret_cast<void**>(&GetTargetFps));
-    MH_CreateHook(throwItemAddr, ThrowItemHook, reinterpret_cast<void**>(&ThrowItem));
-    MH_CreateHook(animBlendAddr, UpdateAnimationBlendingHook, reinterpret_cast<void**>(&UpdateAnimationBlending));
+    MH_CreateHook(getTimeBase, GetTimeBaseHook, reinterpret_cast<void**>(&GetTimeBase));
+    MH_CreateHook(updateMotionA, UpdateMotionTimeBaseAHook, reinterpret_cast<void**>(&UpdateMotionTimeBaseA));
+    MH_CreateHook(updateMotionB, UpdateMotionTimeBaseBHook, reinterpret_cast<void**>(&UpdateMotionTimeBaseB));
+    MH_CreateHook(getTargetFps, GetTargetFpsHook, reinterpret_cast<void**>(&GetTargetFps));
+    MH_CreateHook(throwItem, ThrowItemHook, reinterpret_cast<void**>(&ThrowItem));
+    MH_CreateHook(animBlend, UpdateAnimationBlendingHook, reinterpret_cast<void**>(&UpdateAnimationBlending));
     MH_CreateHook(getActorExecTime, GetActorExecTimeHook, reinterpret_cast<void**>(&GetActorExecTime));
-    
+    MH_CreateHook(adjustTick, AdjustTickHook, reinterpret_cast<void**>(&AdjustTick));
+    MH_CreateHook(adjustTick2, AdjustTick2Hook, reinterpret_cast<void**>(&AdjustTick2));
+    MH_CreateHook(adjustTick3, AdjustTick3Hook, reinterpret_cast<void**>(&AdjustTick3));
+    MH_CreateHook(adjustTick5, AdjustTick5Hook, reinterpret_cast<void**>(&AdjustTick5));
+    MH_CreateHook(convertFrom60, ConvertFrom60Hook, reinterpret_cast<void**>(&ConvertFrom60));
+    MH_CreateHook(convertTo60, ConvertTo60Hook, reinterpret_cast<void**>(&ConvertTo60));
+    MH_CreateHook(setTitleScreenPlaybackSpeed, SetTitleScreenPlaybackSpeed_Hook, reinterpret_cast<void**>(&SetTitleScreenPlaybackSpeed));
+
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) 
     {
         spdlog::error("Failed to create or enable one or more hooks");
@@ -207,7 +254,7 @@ bool MGS3FramerateUnlocker::InstallHooks()
 
 bool MGS3FramerateUnlocker::InCutscene() const
 {
-    return gameVars.cutsceneFlag != nullptr && (*gameVars.cutsceneFlag == 0);
+    return gameVars.cutsceneFlag != nullptr && (*gameVars.cutsceneFlag > 0);
 }
 
 float MGS3FramerateUnlocker::CalculateMotionTimeBase(float value) const
@@ -229,6 +276,40 @@ uint64_t __fastcall MGS3FramerateUnlocker::GetTimeBaseHook(struct _exception* a1
     }
 
     return instance->timeBase;
+}
+
+__int64 __fastcall MGS3FramerateUnlocker::AdjustTickHook(struct _exception* a1)
+{
+    unsigned int tick = (unsigned int)a1;
+    return (tick * 5 + instance->timeBase / 2) / instance->timeBase;
+}
+
+__int64 __fastcall MGS3FramerateUnlocker::AdjustTick2Hook(struct _exception* a1)
+{
+    unsigned int tick = (unsigned int)a1;
+    return (tick * instance->timeBase) / 5;
+}
+
+float __fastcall MGS3FramerateUnlocker::AdjustTick3Hook(float tick)
+{
+    return tick * instance->timeBaseFloat / 5.0f;
+}
+
+float __fastcall MGS3FramerateUnlocker::AdjustTick5Hook(float tick)
+{
+    return tick * 5.0f / instance->timeBaseFloat;
+}
+
+__int64 __fastcall MGS3FramerateUnlocker::ConvertFrom60Hook(struct _exception* a1)
+{
+    unsigned int frames = (unsigned int)a1;
+    return (int)((int64_t)frames * 5 / instance->timeBase);
+}
+
+__int64 __fastcall MGS3FramerateUnlocker::ConvertTo60Hook(struct _exception* a1)
+{
+    unsigned int frames = (unsigned int)a1;
+    return (int)((int64_t)frames * instance->timeBase / 5);
 }
 
 void __fastcall MGS3FramerateUnlocker::UpdateMotionTimeBaseAHook(uint64_t a1, float a2, int a3)
@@ -309,6 +390,7 @@ bool MGS3FramerateUnlocker::Initialize()
 
     frameRateModifier = static_cast<float>(Config.targetFramerate) / DEFAULT_FPS;
     timeBase = std::round(DEFAULT_TIMEBASE / frameRateModifier - 0.1);
+    timeBaseFloat = DEFAULT_TIMEBASE / frameRateModifier;
 
     // Apply initial values
     *gameVars.timeBase = timeBase;
