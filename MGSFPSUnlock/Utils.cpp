@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <shlwapi.h>
 #include <string>
+#include <spdlog/spdlog.h>
 
 void GetGameType(HMODULE gameModule, GameType& result)
 {
@@ -60,4 +61,22 @@ uint64_t GetGameVersion(HMODULE gameModule)
         delete[] verData;
     }
     return 0;
+}
+
+uintptr_t GetRelativeOffset(uint8_t* addr)
+{
+    return reinterpret_cast<uintptr_t>(addr) + 4 + *reinterpret_cast<int32_t*>(addr);
+}
+
+void LogAddress(std::string name, uintptr_t addr)
+{
+    uintptr_t rebased = addr - GameBase;
+
+    if (rebased < 0)
+    {
+        spdlog::error("Failed to find address {}", name);
+        return;
+    }
+
+    spdlog::debug("{} = {:#x}", name, rebased);
 }
