@@ -12,7 +12,7 @@
 
 std::shared_ptr<spdlog::logger> logger;
 std::filesystem::path sLogFile = "MGSFPSUnlock.log";
-std::string sFixVer = "0.0.6";
+std::string sFixVer = "0.0.7";
 std::filesystem::path sExePath;
 std::filesystem::path sFixPath;
 
