@@ -31,6 +31,8 @@ private:
     typedef __int64(__fastcall* AdjustTickDelegate)(struct _exception* a1);
     typedef __int64(__fastcall* UpdateTitleScreenLayerDelegate)(__int64 a1);
     typedef __int64(__fastcall* SetTitleScreenPlaybackSpeedDelegate)(__int64 a1, float a2);
+    typedef __int64(__fastcall* SleepEffectSpeedDelegate)(__int64 a1, float* a2, int a3, char a4, char a5);
+    typedef __int64(__fastcall* SleepEffectScaleDelegate)(__int64 a1);
 
     // Game data structure
     struct GameVariables 
@@ -41,6 +43,7 @@ private:
         float* cameraSpeedModifierA;
         float* cameraSpeedModifierB;
         float* realTimeRate;
+        float* floatHalf;
     };
 
     //  function pointers
@@ -59,6 +62,8 @@ private:
     AdjustTickDelegate ConvertTo60;
     UpdateTitleScreenLayerDelegate UpdateTitleScreenLayer;
     SetTitleScreenPlaybackSpeedDelegate SetTitleScreenPlaybackSpeed;
+    SleepEffectScaleDelegate SleepEffectScale;
+    SleepEffectSpeedDelegate SleepEffectSpeed;
 
     // Game data
     GameVariables gameVars;
@@ -89,6 +94,8 @@ private:
     static __int64 __fastcall ConvertTo60Hook(struct _exception* a1);
     static __int64 __fastcall SetTitleScreenPlaybackSpeedHook(__int64 a1, float a2);
     static __int64 __fastcall UpdateTitleScreenLayerHook(__int64 a1);
+    static __int64 __fastcall SleepEffectSpeedHook(__int64 a1, float* a2, int a3, char a4, char a5);
+    static __int64 __fastcall SleepEffectScaleHook(__int64 a1);
 };
 
 MGS3FramerateUnlocker* MGS3FramerateUnlocker::instance = nullptr;
@@ -113,28 +120,25 @@ bool MGS3FramerateUnlocker::InitializeOffsets()
     memset(&gameVars, 0, sizeof(GameVariables));
 
     addr = Memory::PatternScan(GameModule, "33 C9 83 F8 01 ?? ?? C1 83 C1 05");
-    if (!addr) spdlog::error("Could not find GV_TimeBase");
-    else gameVars.timeBase = reinterpret_cast<int*>(GetRelativeOffset(addr + 13));
+    if (addr) gameVars.timeBase = reinterpret_cast<int*>(GetRelativeOffset(addr + 13));
 
     addr = Memory::PatternScan(GameModule, "83 3D ?? ?? ?? ?? 00 ?? ?? F2 0F 10 0D");
-    if (!addr) spdlog::error("Could not find ActorWaitValue");
-    else gameVars.actorWaitValue = reinterpret_cast<double*>(GetRelativeOffset(addr + 13));
+    if (addr) gameVars.actorWaitValue = reinterpret_cast<double*>(GetRelativeOffset(addr + 13));
 
     addr = Memory::PatternScan(GameModule, "89 2D ?? ?? ?? ?? 89 2D ?? ?? ?? ?? C7 05 ?? ?? ?? ?? ?? ?? ?? ?? 40 88 2D");
-    if (!addr) spdlog::error("Could not find CutsceneFlag");
-    else gameVars.cutsceneFlag = reinterpret_cast<int*>(GetRelativeOffset(addr + 2));
+    if (addr) gameVars.cutsceneFlag = reinterpret_cast<int*>(GetRelativeOffset(addr + 2));
 
     addr = Memory::PatternScan(GameModule, "0F 28 F0 E8 ?? ?? ?? ?? F3 0F 10 0D ?? ?? ?? ??");
-    if (!addr) spdlog::error("Could not find CameraSpeedModifierA");
-    else gameVars.cameraSpeedModifierA = reinterpret_cast<float*>(GetRelativeOffset(addr + 12));
+    if (addr) gameVars.cameraSpeedModifierA = reinterpret_cast<float*>(GetRelativeOffset(addr + 12));
 
     addr = Memory::PatternScan(GameModule, "0F 28 ?? F3 0F 10 87 90 00 00 00 F3 0F 10 15");
-    if (!addr) spdlog::error("Could not find CameraSpeedModifierB");
-    else gameVars.cameraSpeedModifierB = reinterpret_cast<float*>(GetRelativeOffset(addr + 15));
+    if (addr) gameVars.cameraSpeedModifierB = reinterpret_cast<float*>(GetRelativeOffset(addr + 15));
 
     addr = Memory::PatternScan(GameModule, "0F 6E C0 0F 5B C0 F3 0F 59 05 ?? ?? ?? ?? F3 48 0F 2C C0", 1);
-    if (!addr) spdlog::error("Could not find RealTimeRate");
-    else gameVars.realTimeRate = reinterpret_cast<float*>(GetRelativeOffset(addr + 10));
+    if (addr) gameVars.realTimeRate = reinterpret_cast<float*>(GetRelativeOffset(addr + 10));
+
+    addr = Memory::PatternScan(GameModule, "F3 0F 59 3D ?? ?? ?? ?? C7 05");
+    if (addr) gameVars.floatHalf = reinterpret_cast<float*>(GetRelativeOffset(addr + 4));
 
     // set offsets manually here (useful for development)
     switch (Config.gameVersion) 
@@ -151,9 +155,10 @@ bool MGS3FramerateUnlocker::InitializeOffsets()
     LogAddress("cameraSpeedModifierA", (uintptr_t)gameVars.cameraSpeedModifierA);
     LogAddress("cameraSpeedModifierB", (uintptr_t)gameVars.cameraSpeedModifierB);
     LogAddress("realTimeRate", (uintptr_t)gameVars.realTimeRate);
+    LogAddress("floatHalf", (uintptr_t)gameVars.floatHalf);
 
     if (!gameVars.timeBase || !gameVars.actorWaitValue || !gameVars.cutsceneFlag || !gameVars.cameraSpeedModifierA ||
-        !gameVars.cameraSpeedModifierB || !gameVars.realTimeRate) 
+        !gameVars.cameraSpeedModifierB || !gameVars.realTimeRate || !gameVars.floatHalf)
     {
         spdlog::error("Failed to initialize one or more critical offsets");
         return false;
@@ -164,6 +169,7 @@ bool MGS3FramerateUnlocker::InitializeOffsets()
     VirtualProtect(gameVars.cameraSpeedModifierA, 4, PAGE_READWRITE, &oldProtect);
     VirtualProtect(gameVars.cameraSpeedModifierB, 4, PAGE_READWRITE, &oldProtect);
     VirtualProtect(gameVars.realTimeRate, 4, PAGE_READWRITE, &oldProtect);
+    VirtualProtect(gameVars.floatHalf, 4, PAGE_READWRITE, &oldProtect);
 
     return true;
 }
@@ -196,6 +202,8 @@ bool MGS3FramerateUnlocker::InstallHooks()
     uint8_t* convertTo60 = Memory::PatternScan(GameModule, "40 53 48 83 EC ?? 48 63 D9 E8 ?? ?? ?? ?? 85 C0 74 ?? 48 8D 0C 5B");
     uint8_t* setTitleScreenPlaybackSpeed = Memory::PatternScan(GameModule, "48 8B C1 48 C1 E0 ?? 48 85 C9 74 ?? 48 39 48 ?? 75 ? F3 0F 11 88 ?? ?? ?? ?? C3");
     uint8_t* updateTitleScreenLayer = Memory::PatternScan(GameModule, "48 89 5C 24 ?? 57 48 83 EC ?? 4C 8B 81 ?? ?? ?? ?? 0F 57 D2");
+    uint8_t* sleepEffectScale = Memory::PatternScan(GameModule, "40 55 57 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ?? 83 B9");
+    uint8_t* sleepEffectSpeed = Memory::PatternScan(GameModule, "48 8B C4 55 53 56 57 41 56 48 8D 68 ?? 48 81 EC ?? ?? ?? ?? 0F 29 70 ?? 41 8B D8");
 
     LogAddress("getTimeBase", (uintptr_t)getTimeBase);
     LogAddress("updateMotionA", (uintptr_t)updateMotionA);
@@ -214,10 +222,12 @@ bool MGS3FramerateUnlocker::InstallHooks()
     LogAddress("convertTo60", (uintptr_t)convertTo60);
     LogAddress("setTitleScreenPlaybackSpeed", (uintptr_t)setTitleScreenPlaybackSpeed);
     LogAddress("updateTitleScreenLayer", (uintptr_t)updateTitleScreenLayer);
+    LogAddress("sleepEffectScale", (uintptr_t)sleepEffectScale);
+    LogAddress("sleepEffectSpeed", (uintptr_t)sleepEffectSpeed);
 
     if (!getTimeBase || !updateMotionA || !updateMotionB || !getTargetFps || !throwItem || !animBlend || !getActorExecTime ||
         !adjustTick || !adjustTick2 || !adjustTick3 || !adjustTick5 || !adjustTick8 || !adjustTick9 || !convertFrom60 || !convertTo60 ||
-        !setTitleScreenPlaybackSpeed || !updateTitleScreenLayer)
+        !setTitleScreenPlaybackSpeed || !updateTitleScreenLayer || !sleepEffectScale || !sleepEffectSpeed)
     {
         spdlog::error("Failed to find one or more function patterns");
         return false;
@@ -238,6 +248,8 @@ bool MGS3FramerateUnlocker::InstallHooks()
     MH_CreateHook(convertTo60, ConvertTo60Hook, reinterpret_cast<void**>(&ConvertTo60));
     MH_CreateHook(setTitleScreenPlaybackSpeed, SetTitleScreenPlaybackSpeedHook, reinterpret_cast<void**>(&SetTitleScreenPlaybackSpeed));
     MH_CreateHook(updateTitleScreenLayer, UpdateTitleScreenLayerHook, reinterpret_cast<void**>(&UpdateTitleScreenLayer));
+    MH_CreateHook(sleepEffectScale, SleepEffectScaleHook, reinterpret_cast<void**>(&SleepEffectScale));
+    MH_CreateHook(sleepEffectSpeed, SleepEffectSpeedHook, reinterpret_cast<void**>(&SleepEffectSpeed));
 
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) 
     {
@@ -248,6 +260,26 @@ bool MGS3FramerateUnlocker::InstallHooks()
 
     spdlog::info("All hooks installed successfully");
     return true;
+}
+
+__int64 __fastcall MGS3FramerateUnlocker::SleepEffectSpeedHook(__int64 a1, float* a2, int a3, char a4, char a5)
+{
+    float delta = (static_cast<float>(instance->timeBase) / DEFAULT_TIMEBASE);
+
+    return instance->SleepEffectSpeed(a1, a2, (int)(a3 * delta), a4, a5);
+}
+
+__int64 __fastcall MGS3FramerateUnlocker::SleepEffectScaleHook(__int64 a1)
+{
+    float delta = (static_cast<float>(instance->timeBase) / DEFAULT_TIMEBASE);
+    float saved = *instance->gameVars.floatHalf;
+    *instance->gameVars.floatHalf *= delta;
+
+    auto result = instance->SleepEffectScale(a1);
+
+    *instance->gameVars.floatHalf = saved;
+
+    return result;
 }
 
 __int64 __fastcall MGS3FramerateUnlocker::SetTitleScreenPlaybackSpeedHook(__int64 a1, float a2)
