@@ -25,7 +25,7 @@ namespace
     using ClothManagerUpdateDelegate = void(__fastcall*)(uint8_t* manager, float updateArgument, int32_t updateType);
     using ClothProducerUpdateDelegate = void(__fastcall*)(uint8_t* producer, float updateArgument, int32_t updateType);
     using ClothTransformPublishDelegate = void(__fastcall*)(uint8_t* producer);
-    using DirectJacketUpdateDelegate = void(__fastcall*)(uint8_t* jacket, uint8_t* context);
+    using DirectResidentClothUpdateDelegate = void(__fastcall*)(uint8_t* cloth, uint8_t* context);
     using HairSimulationUpdateDelegate = void(__fastcall*)(uint8_t* hair);
     using PhysicsWorldTimeStepDelegate = void(__fastcall*)(uint8_t* world, float deltaTime);
     using NpcRagdollContactUpdateDelegate = void(__fastcall*)(uint8_t* result, uint8_t* character);
@@ -43,7 +43,7 @@ namespace
     ClothManagerUpdateDelegate ClothManagerUpdate = nullptr;
     ClothProducerUpdateDelegate ClothProducerUpdate = nullptr;
     ClothTransformPublishDelegate ClothTransformPublish = nullptr;
-    DirectJacketUpdateDelegate DirectJacketUpdate = nullptr;
+    DirectResidentClothUpdateDelegate DirectResidentClothUpdate = nullptr;
     HairSimulationUpdateDelegate HairSimulationUpdate = nullptr;
     PhysicsWorldTimeStepDelegate PhysicsWorldTimeStep = nullptr;
     NpcRagdollContactUpdateDelegate NpcRagdollContactUpdate = nullptr;
@@ -61,8 +61,6 @@ namespace
     constexpr float ClothReferenceStep = 0.016683351f;
     constexpr float CameraTurnDecay = 0.70710677f;
     constexpr float MaximumReasonableTaskStep = 0.1f;
-    constexpr uint16_t DirectJacketPointCount = 58;
-    constexpr uint32_t BandanaHairChainCount = 17;
     constexpr size_t GamepadCount = 4;
     constexpr size_t GamepadVibrationQueueSize = 0x40;
     constexpr size_t GamepadVibrationQueueBytes = GamepadCount * GamepadVibrationQueueSize;
@@ -74,7 +72,6 @@ namespace
     constexpr ptrdiff_t PolygonDemoTimelineResetOffset = 0x44588;
     constexpr ptrdiff_t ClothContextDeltaOffset = 0x30;
     constexpr ptrdiff_t ClothContextReciprocalDeltaOffset = 0x34;
-    constexpr ptrdiff_t HairChainCountOffset = 0x260;
     constexpr ptrdiff_t PhysicsFixedStepOffset = 0x670;
     constexpr ptrdiff_t NpcRagdollPointerOffset = 0x30;
     constexpr size_t NpcRagdollBodyCount = 13;
@@ -82,7 +79,7 @@ namespace
 
     thread_local bool ActiveClothManagerTiming = false;
     thread_local bool ActiveClothProducerTiming = false;
-    thread_local bool ActiveBandanaTiming = false;
+    thread_local bool ActiveHairTiming = false;
     thread_local bool ActiveNpcRagdollContactUpdate = false;
 
     struct ExecutableSection
@@ -282,7 +279,7 @@ namespace
         if (!taskStep)
             return stepCount;
 
-        if (ActiveBandanaTiming && Config.targetFramerate > ReferenceFps)
+        if (ActiveHairTiming && Config.targetFramerate > ReferenceFps)
         {
             *taskStep = ClothReferenceStep;
             return std::min(1u, maxSteps);
@@ -303,10 +300,17 @@ namespace
 
     void __fastcall ClothManagerUpdateHook(uint8_t* manager, float updateArgument, int32_t updateType)
     {
-        const bool previousTiming = ActiveClothManagerTiming;
-        ActiveClothManagerTiming = true;
-        ClothManagerUpdate(manager, updateArgument, updateType);
-        ActiveClothManagerTiming = previousTiming;
+        if (IsNativeTick())
+        {
+            const bool previousTiming = ActiveClothManagerTiming;
+            ActiveClothManagerTiming = true;
+            ClothManagerUpdate(manager, updateArgument, updateType);
+            ActiveClothManagerTiming = previousTiming;
+        }
+        else if (manager && ClothTransformPublish)
+        {
+            ClothTransformPublish(manager);
+        }
     }
 
     void __fastcall ClothProducerUpdateHook(uint8_t* producer, float updateArgument, int32_t updateType)
@@ -324,36 +328,35 @@ namespace
         }
     }
 
-    void PublishDirectJacketTransform(uint8_t* jacket)
+    void PublishDirectResidentClothTransform(uint8_t* cloth)
     {
-        if (!jacket)
+        if (!cloth)
             return;
 
-        const uint8_t* sourceTransform = *reinterpret_cast<uint8_t**>(jacket + 0x98);
+        const uint8_t* sourceTransform = *reinterpret_cast<uint8_t**>(cloth + 0x98);
         if (sourceTransform)
-            std::memcpy(jacket + 0x4B0, sourceTransform, 0x40);
+            std::memcpy(cloth + 0x4B0, sourceTransform, 0x40);
     }
 
-    void __fastcall DirectJacketUpdateHook(uint8_t* jacket, uint8_t* context)
+    void __fastcall DirectResidentClothUpdateHook(uint8_t* cloth, uint8_t* context)
     {
-        const uint16_t pointCount = jacket ? *reinterpret_cast<uint16_t*>(jacket) : 0;
-        const bool fixedRate = pointCount == DirectJacketPointCount && Config.targetFramerate > ReferenceFps && FrameTickDelta60;
+        const bool fixedRate = cloth && Config.targetFramerate > ReferenceFps && FrameTickDelta60;
 
         if (!fixedRate)
         {
-            DirectJacketUpdate(jacket, context);
+            DirectResidentClothUpdate(cloth, context);
             return;
         }
 
         if (!IsNativeTick())
         {
-            PublishDirectJacketTransform(jacket);
+            PublishDirectResidentClothTransform(cloth);
             return;
         }
 
         if (!context)
         {
-            DirectJacketUpdate(jacket, context);
+            DirectResidentClothUpdate(cloth, context);
             return;
         }
 
@@ -363,18 +366,17 @@ namespace
         const float originalReciprocalDelta = *reciprocalDelta;
         *deltaTime = ClothReferenceStep;
         *reciprocalDelta = 1.0f / ClothReferenceStep;
-        DirectJacketUpdate(jacket, context);
+        DirectResidentClothUpdate(cloth, context);
         *deltaTime = originalDelta;
         *reciprocalDelta = originalReciprocalDelta;
     }
 
     void __fastcall HairSimulationUpdateHook(uint8_t* hair)
     {
-        const uint32_t chainCount = hair ? *reinterpret_cast<uint32_t*>(hair + HairChainCountOffset) : 0;
-        const bool previousTiming = ActiveBandanaTiming;
-        ActiveBandanaTiming = chainCount == BandanaHairChainCount && Config.targetFramerate > ReferenceFps;
+        const bool previousTiming = ActiveHairTiming;
+        ActiveHairTiming = hair && Config.targetFramerate > ReferenceFps;
         HairSimulationUpdate(hair);
-        ActiveBandanaTiming = previousTiming;
+        ActiveHairTiming = previousTiming;
     }
 
     PhysicsWorldTimeState* GetPhysicsWorldTimeState(uint8_t* world, float fixedStep)
@@ -704,7 +706,12 @@ namespace
         if (!update)
             return false;
         LogAddress("clothManagerUpdate", reinterpret_cast<uintptr_t>(update));
-        return MH_CreateHook(update, reinterpret_cast<LPVOID>(&ClothManagerUpdateHook), reinterpret_cast<void**>(&ClothManagerUpdate)) == MH_OK;
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&ClothManagerUpdateHook), reinterpret_cast<void**>(&ClothManagerUpdate)) != MH_OK)
+            return false;
+
+        spdlog::info("Manager-backed strip-cloth simulation advances at 60 Hz while transforms publish per-render");
+        return true;
     }
 
     bool InstallClothProducerTimingFix()
@@ -726,11 +733,11 @@ namespace
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&ClothProducerUpdateHook), reinterpret_cast<void**>(&ClothProducerUpdate)) != MH_OK)
             return false;
 
-        spdlog::info("Strip-cloth simulation timing fix applied");
+        spdlog::info("Shared strip-cloth simulation advances at 60 Hz while transforms publish per-render");
         return true;
     }
 
-    bool InstallDirectJacketTimingFix()
+    bool InstallDirectResidentClothTimingFix()
     {
         constexpr char Pattern[] = "48 8B C4 55 53 48 8D A8 78 FE FF FF 48 81 EC 78 02 00 00 4C 8B 89 58 04 00 00 48 8B D9 44 0F B7 42 3C 48 89 78 18 48 8B FA 4C 89 68 E8";
         constexpr ptrdiff_t SimulationCallOffset = 0x18C;
@@ -738,30 +745,30 @@ namespace
         uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
         if (!update)
             return false;
-        LogAddress("directJacketUpdate", reinterpret_cast<uintptr_t>(update));
+        LogAddress("directResidentClothUpdate", reinterpret_cast<uintptr_t>(update));
 
         uint8_t* simulationCall = update + SimulationCallOffset;
         if (*simulationCall != 0xE8)
         {
-            spdlog::error("MGS4 direct-jacket integration-call validation failed");
+            spdlog::error("MGS4 direct resident-cloth integration-call validation failed");
             return false;
         }
 
         const uintptr_t integrationRva = reinterpret_cast<uintptr_t>(GetRelativeOffset(simulationCall + 1)) - reinterpret_cast<uintptr_t>(GameModule);
         if (integrationRva != 0x629400)
         {
-            spdlog::error("MGS4 direct-jacket integration target is unexpected: {:#x}", integrationRva);
+            spdlog::error("MGS4 direct resident-cloth integration target is unexpected: {:#x}", integrationRva);
             return false;
         }
 
-        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&DirectJacketUpdateHook), reinterpret_cast<void**>(&DirectJacketUpdate)) != MH_OK)
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&DirectResidentClothUpdateHook), reinterpret_cast<void**>(&DirectResidentClothUpdate)) != MH_OK)
             return false;
 
-        spdlog::info("Direct-jacket simulation timing fix applied");
+        spdlog::info("Direct resident-cloth simulation advances at 60 Hz while transforms publish per-render");
         return true;
     }
 
-    bool InstallBandanaHairTimingFix()
+    bool InstallHairTimingFix()
     {
         constexpr char Pattern[] = "40 53 48 81 EC D0 00 00 00 48 8B D9 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 81 48 02 00 00 48 85 C0 74 ?? 44 8B 40 08 48 8B 91 98 02 00 00 48 8B 89 90 02 00 00 49 C1 E0 05 E8 ?? ?? ?? ??";
         uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
@@ -772,7 +779,7 @@ namespace
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&HairSimulationUpdateHook), reinterpret_cast<void**>(&HairSimulationUpdate)) != MH_OK)
             return false;
 
-        spdlog::info("Bandana timing fix applied");
+        spdlog::info("All hair and articulated-chain tasks use the native normalized solver step");
         return true;
     }
 
@@ -862,14 +869,14 @@ void MGS4_Initialize()
         spdlog::error("Failed to install the wind-manager timing fix");
     if (!InstallSpursTaskTimingFix())
         spdlog::error("Failed to install the SPURS task timing fix");
-    if (!InstallBandanaHairTimingFix())
-        spdlog::error("Failed to install the bandana timing fix");
+    if (!InstallHairTimingFix())
+        spdlog::error("Failed to install the hair and articulated-chain timing fix");
     if (!InstallClothManagerTimingFix())
         spdlog::error("Failed to install the strip-cloth manager timing fix");
     if (!InstallClothProducerTimingFix())
         spdlog::error("Failed to install the strip-cloth producer timing fix");
-    if (!InstallDirectJacketTimingFix())
-        spdlog::error("Failed to install the direct-jacket timing fix");
+    if (!InstallDirectResidentClothTimingFix())
+        spdlog::error("Failed to install the direct resident-cloth timing fix");
     if (!InstallPhysicsWorldTimingFix())
         spdlog::error("Failed to install the physics-world timestep fix");
     if (!InstallRagdollContactVelocityFix())
