@@ -7,6 +7,7 @@
 #include "spdlog/sinks/basic_file_sink.h"
 #include "MGS2/mgs2.h"
 #include "MGS3/mgs3.h"
+#include "MGS4/mgs4.h"
 
 #define LOG_FORMAT_PREFIX "[%Y-%m-%d %H:%M:%S.%e] [MGSFPSUnlock] [%l]"
 
@@ -126,6 +127,11 @@ DWORD WINAPI MainThread(LPVOID lpParam)
         spdlog::set_pattern(LOG_FORMAT_PREFIX " MGS3: %v");
         MGS3_Initialize();
         break;
+    case GameType::MGS4:
+        spdlog::info("Found Game: MGS4 - Version: {}", versionstring);
+        spdlog::set_pattern(LOG_FORMAT_PREFIX " MGS4: %v");
+        MGS4_Initialize();
+        break;
     default:
         spdlog::error("Unknown game!");
         break;
@@ -152,4 +158,3 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     }
     return TRUE;
 }
-

@@ -19,6 +19,7 @@ add_library(MGSFPSUnlock SHARED
     MGSFPSUnlock/Memory.cpp
     MGSFPSUnlock/MGS2/mgs2.cpp
     MGSFPSUnlock/MGS3/mgs3.cpp
+    MGSFPSUnlock/MGS4/mgs4.cpp
     MGSFPSUnlock/Utils.cpp
 )
 
@@ -30,6 +31,8 @@ target_include_directories(MGSFPSUnlock PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/MGSFPSUnlock/includes
     ${CMAKE_CURRENT_SOURCE_DIR}/MGSFPSUnlock/MGS2
     ${CMAKE_CURRENT_SOURCE_DIR}/MGSFPSUnlock/MGS3
+    ${CMAKE_CURRENT_SOURCE_DIR}/MGSFPSUnlock/MGS4
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/mINI/src/mini
     ${CMAKE_CURRENT_SOURCE_DIR}/external/spdlog/include
     ${CMAKE_CURRENT_SOURCE_DIR}/external/minhook/include
 )

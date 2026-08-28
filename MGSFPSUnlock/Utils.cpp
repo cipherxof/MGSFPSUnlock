@@ -15,6 +15,8 @@ void GetGameType(HMODULE gameModule, GameType& result)
         result = GameType::MGS2;
     else if (strcmp(filename, "METAL GEAR SOLID3.exe") == 0)
         result = GameType::MGS3;
+    else if (strcmp(filename, "mgs4.exe") == 0)
+        result = GameType::MGS4;
     else
         result = GameType::Unknown;
 }

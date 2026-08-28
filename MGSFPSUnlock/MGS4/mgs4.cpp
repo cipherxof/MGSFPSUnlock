@@ -1,0 +1,716 @@
+#include "mgs4.h"
+#include "Memory.h"
+#include "MinHook.h"
+#include "Utils.h"
+#include "config.h"
+#include "spdlog/spdlog.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstring>
+
+namespace
+{
+    using GetTargetFpsDelegate = int(__fastcall*)();
+    using FrameTimeUpdateDelegate = void(__fastcall*)();
+    using SphericalCameraUpdateDelegate = void(__fastcall*)(uint8_t* camera);
+    using PolygonDemoUpdateDelegate = void(__fastcall*)(uint8_t* demo);
+    using WindManagerUpdateDelegate = void(__fastcall*)(uint8_t* windManager);
+    using SpursTaskTimingDelegate = uint64_t(__fastcall*)(float* taskStep, uint32_t maxSteps);
+    using ClothManagerUpdateDelegate = void(__fastcall*)(uint8_t* manager, float updateArgument, int32_t updateType);
+    using ClothProducerUpdateDelegate = void(__fastcall*)(uint8_t* producer, float updateArgument, int32_t updateType);
+    using ClothTransformPublishDelegate = void(__fastcall*)(uint8_t* producer);
+    using DirectJacketUpdateDelegate = void(__fastcall*)(uint8_t* jacket, uint8_t* context);
+    using HairSimulationUpdateDelegate = void(__fastcall*)(uint8_t* hair);
+    using PhysicsWorldTimeStepDelegate = void(__fastcall*)(uint8_t* world, float deltaTime);
+    using NpcRagdollContactUpdateDelegate = void(__fastcall*)(uint8_t* result, uint8_t* character);
+    using RagdollRadialForceDelegate = void(__fastcall*)(uint8_t* controller, const float* position, float strength);
+
+    GetTargetFpsDelegate GetTargetFps = nullptr;
+    FrameTimeUpdateDelegate FrameTimeUpdate = nullptr;
+    SphericalCameraUpdateDelegate SphericalCameraUpdate = nullptr;
+    PolygonDemoUpdateDelegate PolygonDemoUpdate = nullptr;
+    WindManagerUpdateDelegate WindManagerUpdate = nullptr;
+    SpursTaskTimingDelegate SpursTaskTiming = nullptr;
+    ClothManagerUpdateDelegate ClothManagerUpdate = nullptr;
+    ClothProducerUpdateDelegate ClothProducerUpdate = nullptr;
+    ClothTransformPublishDelegate ClothTransformPublish = nullptr;
+    DirectJacketUpdateDelegate DirectJacketUpdate = nullptr;
+    HairSimulationUpdateDelegate HairSimulationUpdate = nullptr;
+    PhysicsWorldTimeStepDelegate PhysicsWorldTimeStep = nullptr;
+    NpcRagdollContactUpdateDelegate NpcRagdollContactUpdate = nullptr;
+    RagdollRadialForceDelegate RagdollRadialForce = nullptr;
+
+    float* FrameDeltaSeconds = nullptr;
+    int32_t* FrameTickDelta60 = nullptr;
+    int32_t* FrameTickDelta300 = nullptr;
+    double CharacterTickRemainder = 0.0;
+
+    constexpr float ReferenceFps = 60.0f;
+    constexpr float CharacterTickRate = 300.0f;
+    constexpr float ClothReferenceStep = 0.016683351f;
+    constexpr float CameraTurnDecay = 0.70710677f;
+    constexpr float MaximumReasonableTaskStep = 0.1f;
+    constexpr uint16_t DirectJacketPointCount = 58;
+    constexpr uint32_t BandanaHairChainCount = 17;
+    constexpr ptrdiff_t CameraTurnSpeedOffset = 0xC0;
+    constexpr ptrdiff_t CharacterTickOffsetFromDelta = 0xC;
+    constexpr ptrdiff_t PolygonDemoTimelineResetOffset = 0x44588;
+    constexpr ptrdiff_t ClothContextDeltaOffset = 0x30;
+    constexpr ptrdiff_t ClothContextReciprocalDeltaOffset = 0x34;
+    constexpr ptrdiff_t HairChainCountOffset = 0x260;
+    constexpr ptrdiff_t PhysicsFixedStepOffset = 0x670;
+    constexpr ptrdiff_t NpcRagdollPointerOffset = 0x30;
+    constexpr size_t NpcRagdollBodyCount = 13;
+    constexpr size_t PhysicsWorldTimeStateCount = 8;
+
+    thread_local bool ActiveClothManagerTiming = false;
+    thread_local bool ActiveClothProducerTiming = false;
+    thread_local bool ActiveBandanaTiming = false;
+    thread_local bool ActiveNpcRagdollContactUpdate = false;
+
+    struct ExecutableSection
+    {
+        uint8_t* begin = nullptr;
+        uintptr_t size = 0;
+    };
+
+    struct PhysicsWorldTimeState
+    {
+        uintptr_t world = 0;
+        float fixedStep = 0.0f;
+        double accumulator = 0.0;
+    };
+
+    ExecutableSection GameText{};
+    std::array<PhysicsWorldTimeState, PhysicsWorldTimeStateCount> PhysicsWorldTimeStates{};
+
+    bool FindTextSection()
+    {
+        const auto dosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(GameModule);
+        if (!dosHeader || dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+            return false;
+
+        const auto ntHeaders = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<uint8_t*>(GameModule) + dosHeader->e_lfanew);
+        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
+            return false;
+
+        auto section = IMAGE_FIRST_SECTION(ntHeaders);
+        for (WORD index = 0; index < ntHeaders->FileHeader.NumberOfSections; ++index, ++section)
+        {
+            if (std::memcmp(section->Name, ".text", 5) != 0)
+                continue;
+
+            GameText.begin = reinterpret_cast<uint8_t*>(GameModule) + section->VirtualAddress;
+            GameText.size = static_cast<uintptr_t>(section->Misc.VirtualSize);
+            return true;
+        }
+
+        return false;
+    }
+
+    bool IsNativeTick()
+    {
+        return Config.targetFramerate <= ReferenceFps || !FrameTickDelta60 || *FrameTickDelta60 != 0;
+    }
+
+    int __fastcall GetTargetFpsHook()
+    {
+        return Config.targetFramerate;
+    }
+
+    void __fastcall FrameTimeUpdateHook()
+    {
+        FrameTimeUpdate();
+
+        if (Config.targetFramerate <= ReferenceFps || !FrameDeltaSeconds || !FrameTickDelta300)
+        {
+            CharacterTickRemainder = 0.0;
+            return;
+        }
+
+        const float exactTicks = *FrameDeltaSeconds * CharacterTickRate;
+        if (exactTicks < 1.0f || !std::isfinite(exactTicks))
+        {
+            CharacterTickRemainder = 0.0;
+            return;
+        }
+
+        const double accumulatedTicks = CharacterTickRemainder + exactTicks;
+        const int32_t wholeTicks = static_cast<int32_t>(accumulatedTicks);
+        CharacterTickRemainder = accumulatedTicks - wholeTicks;
+        *FrameTickDelta300 = wholeTicks;
+    }
+
+    void __fastcall SphericalCameraUpdateHook(uint8_t* camera)
+    {
+        if (!camera || !FrameDeltaSeconds)
+        {
+            SphericalCameraUpdate(camera);
+            return;
+        }
+
+        const float deltaTime = *FrameDeltaSeconds;
+        if (!(deltaTime > 0.0f) || !std::isfinite(deltaTime))
+        {
+            SphericalCameraUpdate(camera);
+            return;
+        }
+
+        const float frameDecay = std::pow(CameraTurnDecay, deltaTime * ReferenceFps);
+        const float turnRateScale = (1.0f - frameDecay) / (1.0f - CameraTurnDecay);
+        float* turnSpeed = reinterpret_cast<float*>(camera + CameraTurnSpeedOffset);
+        const float originalTurnSpeed = *turnSpeed;
+        *turnSpeed *= turnRateScale;
+        SphericalCameraUpdate(camera);
+        *turnSpeed = originalTurnSpeed;
+    }
+
+    void __fastcall PolygonDemoUpdateHook(uint8_t* demo)
+    {
+        const bool timelineReset = demo && *reinterpret_cast<int32_t*>(demo + PolygonDemoTimelineResetOffset) != 0;
+        if (timelineReset || IsNativeTick())
+            PolygonDemoUpdate(demo);
+    }
+
+    void __fastcall WindManagerUpdateHook(uint8_t* windManager)
+    {
+        if (IsNativeTick())
+            WindManagerUpdate(windManager);
+    }
+
+    uint64_t __fastcall SpursTaskTimingHook(float* taskStep, uint32_t maxSteps)
+    {
+        uint64_t stepCount = SpursTaskTiming(taskStep, maxSteps);
+        if (!taskStep)
+            return stepCount;
+
+        if (ActiveBandanaTiming && Config.targetFramerate > ReferenceFps)
+        {
+            *taskStep = ClothReferenceStep;
+            return std::min(1u, maxSteps);
+        }
+
+        const float stockStep = *taskStep;
+        const float exactDelta = FrameDeltaSeconds ? *FrameDeltaSeconds : 0.0f;
+        const bool useExactDelta = !ActiveClothManagerTiming && !ActiveClothProducerTiming && exactDelta > 0.0f && std::isfinite(exactDelta) &&
+                                   stockStep > exactDelta && stockStep <= MaximumReasonableTaskStep && std::isfinite(stockStep);
+        if (useExactDelta)
+        {
+            *taskStep = exactDelta;
+            stepCount = 1;
+        }
+
+        return stepCount;
+    }
+
+    void __fastcall ClothManagerUpdateHook(uint8_t* manager, float updateArgument, int32_t updateType)
+    {
+        const bool previousTiming = ActiveClothManagerTiming;
+        ActiveClothManagerTiming = true;
+        ClothManagerUpdate(manager, updateArgument, updateType);
+        ActiveClothManagerTiming = previousTiming;
+    }
+
+    void __fastcall ClothProducerUpdateHook(uint8_t* producer, float updateArgument, int32_t updateType)
+    {
+        if (IsNativeTick())
+        {
+            const bool previousTiming = ActiveClothProducerTiming;
+            ActiveClothProducerTiming = true;
+            ClothProducerUpdate(producer, updateArgument, updateType);
+            ActiveClothProducerTiming = previousTiming;
+        }
+        else if (producer && ClothTransformPublish)
+        {
+            ClothTransformPublish(producer);
+        }
+    }
+
+    void PublishDirectJacketTransform(uint8_t* jacket)
+    {
+        if (!jacket)
+            return;
+
+        const uint8_t* sourceTransform = *reinterpret_cast<uint8_t**>(jacket + 0x98);
+        if (sourceTransform)
+            std::memcpy(jacket + 0x4B0, sourceTransform, 0x40);
+    }
+
+    void __fastcall DirectJacketUpdateHook(uint8_t* jacket, uint8_t* context)
+    {
+        const uint16_t pointCount = jacket ? *reinterpret_cast<uint16_t*>(jacket) : 0;
+        const bool fixedRate = pointCount == DirectJacketPointCount && Config.targetFramerate > ReferenceFps && FrameTickDelta60;
+
+        if (!fixedRate)
+        {
+            DirectJacketUpdate(jacket, context);
+            return;
+        }
+
+        if (!IsNativeTick())
+        {
+            PublishDirectJacketTransform(jacket);
+            return;
+        }
+
+        if (!context)
+        {
+            DirectJacketUpdate(jacket, context);
+            return;
+        }
+
+        float* deltaTime = reinterpret_cast<float*>(context + ClothContextDeltaOffset);
+        float* reciprocalDelta = reinterpret_cast<float*>(context + ClothContextReciprocalDeltaOffset);
+        const float originalDelta = *deltaTime;
+        const float originalReciprocalDelta = *reciprocalDelta;
+        *deltaTime = ClothReferenceStep;
+        *reciprocalDelta = 1.0f / ClothReferenceStep;
+        DirectJacketUpdate(jacket, context);
+        *deltaTime = originalDelta;
+        *reciprocalDelta = originalReciprocalDelta;
+    }
+
+    void __fastcall HairSimulationUpdateHook(uint8_t* hair)
+    {
+        const uint32_t chainCount = hair ? *reinterpret_cast<uint32_t*>(hair + HairChainCountOffset) : 0;
+        const bool previousTiming = ActiveBandanaTiming;
+        ActiveBandanaTiming = chainCount == BandanaHairChainCount && Config.targetFramerate > ReferenceFps;
+        HairSimulationUpdate(hair);
+        ActiveBandanaTiming = previousTiming;
+    }
+
+    PhysicsWorldTimeState* GetPhysicsWorldTimeState(uint8_t* world, float fixedStep)
+    {
+        const uintptr_t worldAddress = reinterpret_cast<uintptr_t>(world);
+        const size_t first = (worldAddress >> 4) & (PhysicsWorldTimeStateCount - 1);
+
+        for (size_t probe = 0; probe < PhysicsWorldTimeStateCount; ++probe)
+        {
+            PhysicsWorldTimeState& state = PhysicsWorldTimeStates[(first + probe) & (PhysicsWorldTimeStateCount - 1)];
+            if (state.world == worldAddress)
+            {
+                if (state.fixedStep != fixedStep)
+                {
+                    state.fixedStep = fixedStep;
+                    state.accumulator = 0.0;
+                }
+                return &state;
+            }
+
+            if (state.world == 0)
+            {
+                state.world = worldAddress;
+                state.fixedStep = fixedStep;
+                state.accumulator = 0.0;
+                return &state;
+            }
+        }
+
+        PhysicsWorldTimeState& state = PhysicsWorldTimeStates[first];
+        state.world = worldAddress;
+        state.fixedStep = fixedStep;
+        state.accumulator = 0.0;
+        return &state;
+    }
+
+    void __fastcall PhysicsWorldTimeStepHook(uint8_t* world, float deltaTime)
+    {
+        if (!world || !(deltaTime > 0.0f) || !std::isfinite(deltaTime))
+        {
+            PhysicsWorldTimeStep(world, deltaTime);
+            return;
+        }
+
+        const float fixedStep = *reinterpret_cast<float*>(world + PhysicsFixedStepOffset);
+        if (!(fixedStep > 0.0f) || fixedStep >= 1.0f || !std::isfinite(fixedStep))
+        {
+            PhysicsWorldTimeStep(world, deltaTime);
+            return;
+        }
+
+        PhysicsWorldTimeState* state = GetPhysicsWorldTimeState(world, fixedStep);
+        state->accumulator += static_cast<double>(deltaTime);
+        uint32_t stepCount = static_cast<uint32_t>(state->accumulator / static_cast<double>(fixedStep) + 0.00001);
+        stepCount = std::min(stepCount, 2u);
+        if (stepCount == 0)
+            return;
+
+        const float simulatedTime = stepCount * fixedStep;
+        state->accumulator -= static_cast<double>(simulatedTime);
+        state->accumulator = std::max(state->accumulator, 0.0);
+        PhysicsWorldTimeStep(world, simulatedTime);
+    }
+
+    void ScaleNpcRagdollVelocity(uint8_t* ragdoll, float scale)
+    {
+        if (!ragdoll)
+            return;
+
+        for (size_t index = 0; index < NpcRagdollBodyCount; ++index)
+        {
+            uint8_t* body = *reinterpret_cast<uint8_t**>(ragdoll + 8 + index * sizeof(uintptr_t));
+            if (!body)
+                continue;
+
+            float* linearVelocity = reinterpret_cast<float*>(body + 0x60);
+            float* angularVelocity = reinterpret_cast<float*>(body + 0x70);
+            for (size_t component = 0; component < 3; ++component)
+            {
+                linearVelocity[component] *= scale;
+                angularVelocity[component] *= scale;
+            }
+        }
+    }
+
+    void __fastcall RagdollRadialForceHook(uint8_t* controller, const float* position, float strength)
+    {
+        const float frameDelta = FrameDeltaSeconds ? *FrameDeltaSeconds : 0.0f;
+        const float velocityScale = frameDelta * ReferenceFps;
+
+        if (ActiveNpcRagdollContactUpdate && velocityScale > 0.0f && velocityScale < 1.0f && std::isfinite(velocityScale))
+        {
+            uint8_t* ragdoll = controller ? *reinterpret_cast<uint8_t**>(controller + NpcRagdollPointerOffset) : nullptr;
+            ScaleNpcRagdollVelocity(ragdoll, velocityScale);
+        }
+
+        RagdollRadialForce(controller, position, strength);
+    }
+
+    void __fastcall NpcRagdollContactUpdateHook(uint8_t* result, uint8_t* character)
+    {
+        const bool wasActive = ActiveNpcRagdollContactUpdate;
+        ActiveNpcRagdollContactUpdate = true;
+        NpcRagdollContactUpdate(result, character);
+        ActiveNpcRagdollContactUpdate = wasActive;
+    }
+
+    uint8_t* FindTargetFps()
+    {
+        constexpr char TargetFpsPattern[] = "40 55 48 8B EC 48 83 EC 50 8B 05 ?? ?? ?? ?? 83 F8 FF 0F 85 ?? ?? ?? ?? E8 ?? ?? ?? ?? 3D 80 00 00 00";
+
+        if (!FindTextSection())
+            return nullptr;
+
+        // The ASI can load before the packed executable has restored .text.
+        for (int attempt = 0; attempt < 60; ++attempt)
+        {
+            uint8_t* address = Memory::PatternScanRange(GameText.begin, GameText.size, TargetFpsPattern);
+            if (address)
+                return address;
+
+            if (attempt == 0)
+                spdlog::info("Waiting for mgs4.exe to unpack its code");
+            Sleep(250);
+        }
+
+        return nullptr;
+    }
+
+    bool InstallCharacterControlTimingFix()
+    {
+        constexpr char Pattern[] = "40 53 48 83 EC 20 83 3D ?? ?? ?? ?? 00 BB 01 00 00 00 75 ?? 89 1D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? E8";
+
+        if (!FrameDeltaSeconds)
+        {
+            spdlog::error("MGS4 character timing requires the frame delta");
+            return false;
+        }
+
+        uint8_t* frameTimeUpdate = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        if (!frameTimeUpdate)
+            return false;
+        LogAddress("frameTimeUpdate", reinterpret_cast<uintptr_t>(frameTimeUpdate));
+
+        FrameTickDelta300 = reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(FrameDeltaSeconds) + CharacterTickOffsetFromDelta);
+        LogAddress("frameTickDelta300", reinterpret_cast<uintptr_t>(FrameTickDelta300));
+
+        if (MH_CreateHook(frameTimeUpdate, reinterpret_cast<LPVOID>(&FrameTimeUpdateHook), reinterpret_cast<void**>(&FrameTimeUpdate)) != MH_OK)
+            return false;
+
+        spdlog::info("Character control timing fix installed");
+        return true;
+    }
+
+    bool InstallSphericalCameraTimingFix()
+    {
+        constexpr char Pattern[] = "48 89 5C 24 10 56 48 83 EC 30 48 8B D9 48 89 7C 24 40 8B 89 A8 00 00 00 33 F6 85 C9 0F 84 ?? ?? ?? ?? 83 E9 01 0F 84 ?? ?? ?? ?? 83 E9 01 74 ?? 83 F9 01 0F 85 ?? ?? ?? ?? F3 0F 10 05 ?? ?? ?? ??";
+        constexpr ptrdiff_t DeltaLoadOffset = 0x39;
+        constexpr ptrdiff_t DeltaDisplacementOffset = DeltaLoadOffset + 4;
+        constexpr ptrdiff_t DeltaInstructionSize = 8;
+        constexpr std::array<uint8_t, 4> DeltaLoadOpcode = {0xF3, 0x0F, 0x10, 0x05};
+
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        if (!update)
+            return false;
+        LogAddress("sphericalCameraUpdate", reinterpret_cast<uintptr_t>(update));
+        if (std::memcmp(update + DeltaLoadOffset, DeltaLoadOpcode.data(), DeltaLoadOpcode.size()) != 0)
+        {
+            spdlog::error("Spherical camera delta-time load validation failed");
+            return false;
+        }
+
+        int32_t displacement = 0;
+        std::memcpy(&displacement, update + DeltaDisplacementOffset, sizeof(displacement));
+        FrameDeltaSeconds = reinterpret_cast<float*>(update + DeltaLoadOffset + DeltaInstructionSize + displacement);
+        LogAddress("frameDeltaSeconds", reinterpret_cast<uintptr_t>(FrameDeltaSeconds));
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&SphericalCameraUpdateHook), reinterpret_cast<void**>(&SphericalCameraUpdate)) != MH_OK)
+        {
+            FrameDeltaSeconds = nullptr;
+            return false;
+        }
+
+        spdlog::info("Spherical camera turn rate normalized");
+        return true;
+    }
+
+    bool InstallPolygonDemoTimingFix()
+    {
+        constexpr char Pattern[] = "48 89 5C 24 20 56 57 41 54 41 56 41 57 48 83 EC 40 48 8B 1D ?? ?? ?? ?? 4C 8D B1 90 00 00 00 33 F6 4C 8D 3D ?? ?? ?? ?? 48 8B F9 8B 89 C4 45 04 00 44 8D 66 01 8D 56 02 85 C9 7E ?? 3B 8F C0 45 04 00";
+        constexpr ptrdiff_t TimeDeltaLoadOffset = 0x21;
+        constexpr ptrdiff_t TimeDeltaDisplacementOffset = TimeDeltaLoadOffset + 3;
+        constexpr ptrdiff_t TickDelta60Offset = 8;
+        constexpr std::array<uint8_t, 3> TimeDeltaLoadOpcode = {0x4C, 0x8D, 0x3D};
+
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        if (!update)
+            return false;
+        LogAddress("polygonDemoUpdate", reinterpret_cast<uintptr_t>(update));
+        if (std::memcmp(update + TimeDeltaLoadOffset, TimeDeltaLoadOpcode.data(), TimeDeltaLoadOpcode.size()) != 0)
+        {
+            spdlog::error("MGS4 polygon-demo time-delta load validation failed");
+            return false;
+        }
+
+        uint8_t* timeDelta = reinterpret_cast<uint8_t*>(GetRelativeOffset(update + TimeDeltaDisplacementOffset));
+        FrameTickDelta60 = reinterpret_cast<int32_t*>(timeDelta + TickDelta60Offset);
+        LogAddress("frameTickDelta60", reinterpret_cast<uintptr_t>(FrameTickDelta60));
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&PolygonDemoUpdateHook), reinterpret_cast<void**>(&PolygonDemoUpdate)) != MH_OK)
+        {
+            FrameTickDelta60 = nullptr;
+            return false;
+        }
+
+        spdlog::info("Polygon demos fix applied");
+        return true;
+    }
+
+    bool InstallWindManagerTimingFix()
+    {
+        constexpr char Pattern[] = "40 53 48 81 EC 80 00 00 00 48 8B D9 E8 ?? ?? ?? ?? 8B 05 ?? ?? ?? ?? 0B 05 ?? ?? ?? ?? A9 00 00 80 10 74";
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        if (!update)
+            return false;
+        LogAddress("windManagerUpdate", reinterpret_cast<uintptr_t>(update));
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&WindManagerUpdateHook), reinterpret_cast<void**>(&WindManagerUpdate)) != MH_OK)
+            return false;
+
+        spdlog::info("Global wind timing fix applied");
+        return true;
+    }
+
+    bool InstallSpursTaskTimingFix()
+    {
+        constexpr char Pattern[] = "48 89 5C 24 08 57 48 83 EC 40 8B 05 ?? ?? ?? ?? 48 8B D9 0B 05 ?? ?? ?? ?? 0F 29 74 24 30 0F 29 7C 24 20 8B FA A9 00 00 00 06";
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        if (!update)
+            return false;
+        LogAddress("spursTaskTiming", reinterpret_cast<uintptr_t>(update));
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&SpursTaskTimingHook), reinterpret_cast<void**>(&SpursTaskTiming)) != MH_OK)
+            return false;
+
+        spdlog::info("SPURS simulation tasks now use corrected timing");
+        return true;
+    }
+
+    bool InstallClothManagerTimingFix()
+    {
+        constexpr char Pattern[] = "48 89 74 24 10 57 48 83 EC 30 48 8B 81 80 03 00 00 41 8B F0 0F 29 74 24 20 48 8B F9 0F 28 F1 83 38 00 C7 40 04 00 00 00 00 74 ??";
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        if (!update)
+            return false;
+        LogAddress("clothManagerUpdate", reinterpret_cast<uintptr_t>(update));
+        return MH_CreateHook(update, reinterpret_cast<LPVOID>(&ClothManagerUpdateHook), reinterpret_cast<void**>(&ClothManagerUpdate)) == MH_OK;
+    }
+
+    bool InstallClothProducerTimingFix()
+    {
+        constexpr char ProducerPattern[] = "48 89 5C 24 18 55 57 41 56 48 81 EC 10 01 00 00 48 8B B9 70 03 00 00 45 33 F6 41 8B E8 48 8B D9 48 8B 07 44 89 70 04 44 39 30 74 3D";
+        constexpr char PublishPattern[] = "48 8B 41 08 4C 8B D1 83 38 00 C7 40 04 00 00 00 00 74 5C 49 8B 42 08 4C 63 40 04 44 3B 00 7D 4F";
+
+        uint8_t* publisher = Memory::PatternScanRange(GameText.begin, GameText.size, PublishPattern);
+        if (!publisher)
+            return false;
+        LogAddress("clothTransformPublish", reinterpret_cast<uintptr_t>(publisher));
+        ClothTransformPublish = reinterpret_cast<ClothTransformPublishDelegate>(publisher);
+
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, ProducerPattern);
+        if (!update)
+            return false;
+        LogAddress("clothProducerUpdate", reinterpret_cast<uintptr_t>(update));
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&ClothProducerUpdateHook), reinterpret_cast<void**>(&ClothProducerUpdate)) != MH_OK)
+            return false;
+
+        spdlog::info("Strip-cloth simulation timing fix applied");
+        return true;
+    }
+
+    bool InstallDirectJacketTimingFix()
+    {
+        constexpr char Pattern[] = "48 8B C4 55 53 48 8D A8 78 FE FF FF 48 81 EC 78 02 00 00 4C 8B 89 58 04 00 00 48 8B D9 44 0F B7 42 3C 48 89 78 18 48 8B FA 4C 89 68 E8";
+        constexpr ptrdiff_t SimulationCallOffset = 0x18C;
+
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        if (!update)
+            return false;
+        LogAddress("directJacketUpdate", reinterpret_cast<uintptr_t>(update));
+
+        uint8_t* simulationCall = update + SimulationCallOffset;
+        if (*simulationCall != 0xE8)
+        {
+            spdlog::error("MGS4 direct-jacket integration-call validation failed");
+            return false;
+        }
+
+        const uintptr_t integrationRva = reinterpret_cast<uintptr_t>(GetRelativeOffset(simulationCall + 1)) - reinterpret_cast<uintptr_t>(GameModule);
+        if (integrationRva != 0x629400)
+        {
+            spdlog::error("MGS4 direct-jacket integration target is unexpected: {:#x}", integrationRva);
+            return false;
+        }
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&DirectJacketUpdateHook), reinterpret_cast<void**>(&DirectJacketUpdate)) != MH_OK)
+            return false;
+
+        spdlog::info("Direct-jacket simulation timing fix applied");
+        return true;
+    }
+
+    bool InstallBandanaHairTimingFix()
+    {
+        constexpr char Pattern[] = "40 53 48 81 EC D0 00 00 00 48 8B D9 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 81 48 02 00 00 48 85 C0 74 ?? 44 8B 40 08 48 8B 91 98 02 00 00 48 8B 89 90 02 00 00 49 C1 E0 05 E8 ?? ?? ?? ??";
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        if (!update)
+            return false;
+        LogAddress("hairSimulationUpdate", reinterpret_cast<uintptr_t>(update));
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&HairSimulationUpdateHook), reinterpret_cast<void**>(&HairSimulationUpdate)) != MH_OK)
+            return false;
+
+        spdlog::info("Bandana timing fix applied");
+        return true;
+    }
+
+    bool InstallPhysicsWorldTimingFix()
+    {
+        constexpr char Pattern[] = "48 89 5C 24 10 57 48 83 EC 60 8B 41 08 45 33 C9 0F 29 74 24 50 83 E8 01 48 63 D0 0F 28 F1 0F 29 7C 24 40 48 8B D9 78 ??";
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        if (!update)
+            return false;
+        LogAddress("physicsWorldTimeStep", reinterpret_cast<uintptr_t>(update));
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&PhysicsWorldTimeStepHook), reinterpret_cast<void**>(&PhysicsWorldTimeStep)) != MH_OK)
+            return false;
+
+        spdlog::info("Rigid-body physics timing fix applied");
+        return true;
+    }
+
+    bool InstallRagdollContactVelocityFix()
+    {
+        constexpr char UpdatePattern[] = "48 89 5C 24 18 55 56 41 56 48 83 EC 30 48 8B B2 40 44 00 00 4C 8B F1 48 8B AA 30 44 00 00 48 8B CA 48 8B DA E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 84 C0 74 ?? 81 8B 04 44 00 00 00 00 40 00";
+        constexpr char RadialForcePattern[] = "48 8B C4 48 89 68 10 48 89 70 18 57 48 81 EC 10 01 00 00 0F 28 05 ?? ?? ?? ?? 48 8B EA 48 8B 79 30 48 8B F1 0F 28 0D ?? ?? ?? ?? 44 0F 29 40 C8 44 0F 28 C2 0F 11 44 24 30";
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, UpdatePattern);
+        uint8_t* radialForce = Memory::PatternScanRange(GameText.begin, GameText.size, RadialForcePattern);
+        if (!update || !radialForce)
+            return false;
+        LogAddress("npcRagdollContactUpdate", reinterpret_cast<uintptr_t>(update));
+        LogAddress("ragdollRadialForce", reinterpret_cast<uintptr_t>(radialForce));
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&NpcRagdollContactUpdateHook), reinterpret_cast<void**>(&NpcRagdollContactUpdate)) != MH_OK)
+            return false;
+        if (MH_CreateHook(radialForce, reinterpret_cast<LPVOID>(&RagdollRadialForceHook), reinterpret_cast<void**>(&RagdollRadialForce)) != MH_OK)
+            return false;
+
+        spdlog::info("Ragdoll contact velocity normalized");
+        return true;
+    }
+
+    bool InstallFrameRateHook()
+    {
+        uint8_t* target = FindTargetFps();
+        if (!target)
+        {
+            spdlog::error("Failed to find the MGS4 target FPS function");
+            return false;
+        }
+        LogAddress("getTargetFps", reinterpret_cast<uintptr_t>(target));
+
+        MH_STATUS status = MH_Initialize();
+        if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED)
+        {
+            spdlog::error("Failed to initialize MinHook, status: {}", static_cast<int>(status));
+            return false;
+        }
+
+        return MH_CreateHook(target, reinterpret_cast<LPVOID>(&GetTargetFpsHook), reinterpret_cast<void**>(&GetTargetFps)) == MH_OK;
+    }
+} // namespace
+
+void MGS4_Initialize()
+{
+    spdlog::info("Starting framerate unlocker");
+
+    if (Config.targetFramerate <= 0)
+    {
+        spdlog::error("Invalid target framerate: {}", Config.targetFramerate);
+        return;
+    }
+
+    if (!InstallFrameRateHook())
+    {
+        spdlog::error("Failed to initialize the MGS4 framerate unlocker");
+        return;
+    }
+
+    spdlog::info("Target framerate set to {} FPS", Config.targetFramerate);
+
+    if (!InstallSphericalCameraTimingFix())
+        spdlog::error("Failed to install the spherical camera timing fix");
+    if (!InstallCharacterControlTimingFix())
+        spdlog::error("Failed to install the character control timing fix");
+    if (!InstallPolygonDemoTimingFix())
+        spdlog::error("Failed to install the polygon-demo timing fix");
+    if (!InstallWindManagerTimingFix())
+        spdlog::error("Failed to install the wind-manager timing fix");
+    if (!InstallSpursTaskTimingFix())
+        spdlog::error("Failed to install the SPURS task timing fix");
+    if (!InstallBandanaHairTimingFix())
+        spdlog::error("Failed to install the bandana timing fix");
+    if (!InstallClothManagerTimingFix())
+        spdlog::error("Failed to install the strip-cloth manager timing fix");
+    if (!InstallClothProducerTimingFix())
+        spdlog::error("Failed to install the strip-cloth producer timing fix");
+    if (!InstallDirectJacketTimingFix())
+        spdlog::error("Failed to install the direct-jacket timing fix");
+    if (!InstallPhysicsWorldTimingFix())
+        spdlog::error("Failed to install the physics-world timestep fix");
+    if (!InstallRagdollContactVelocityFix())
+        spdlog::error("Failed to install the ragdoll contact-velocity fix");
+
+    const MH_STATUS status = MH_EnableHook(MH_ALL_HOOKS);
+    if (status != MH_OK)
+    {
+        spdlog::error("Failed to enable one or more MGS4 hooks, status: {}", static_cast<int>(status));
+        MH_Uninitialize();
+        return;
+    }
+
+    spdlog::info("All MGS4 hooks installed successfully");
+}

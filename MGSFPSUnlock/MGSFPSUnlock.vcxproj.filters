@@ -10,6 +10,9 @@
     <ClCompile Include="MGS3\mgs3.cpp">
       <Filter>MGS3</Filter>
     </ClCompile>
+    <ClCompile Include="MGS4\mgs4.cpp">
+      <Filter>MGS4</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="MGS2\mgs2.h">
@@ -17,6 +20,9 @@
     </ClInclude>
     <ClInclude Include="MGS3\mgs3.h">
       <Filter>MGS3</Filter>
+    </ClInclude>
+    <ClInclude Include="MGS4\mgs4.h">
+      <Filter>MGS4</Filter>
     </ClInclude>
     <ClInclude Include="includes\config.h">
       <Filter>includes</Filter>
@@ -46,6 +52,9 @@
     </Filter>
     <Filter Include="MGS2">
       <UniqueIdentifier>{fbda13db-9b45-4ecd-bc1f-f5ab9da2dddf}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="MGS4">
+      <UniqueIdentifier>{35b12bc7-8263-4f0d-80f3-4d73b34300bf}</UniqueIdentifier>
     </Filter>
     <Filter Include="includes">
       <UniqueIdentifier>{6bf4a300-050b-439a-b288-f1a439f6681d}</UniqueIdentifier>

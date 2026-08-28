@@ -169,12 +169,14 @@
     <ClInclude Include="logger.h" />
     <ClInclude Include="MGS2\mgs2.h" />
     <ClInclude Include="MGS3\mgs3.h" />
+    <ClInclude Include="MGS4\mgs4.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="Memory.cpp" />
     <ClCompile Include="MGS2\mgs2.cpp" />
     <ClCompile Include="MGS3\mgs3.cpp" />
+    <ClCompile Include="MGS4\mgs4.cpp" />
     <ClCompile Include="Utils.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

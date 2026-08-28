@@ -6,7 +6,8 @@ enum class GameType
 {
     Unknown,
     MGS2,
-    MGS3
+    MGS3,
+    MGS4
 };
 
 struct GameConfig 
