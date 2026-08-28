@@ -9,11 +9,15 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 
 namespace
 {
     using GetTargetFpsDelegate = int(__fastcall*)();
     using FrameTimeUpdateDelegate = void(__fastcall*)();
+    using GamepadUpdateDelegate = void(__fastcall*)(uint32_t connectedMask, uint8_t* states, uint32_t* updatedMask, uint32_t resetMask, int32_t resetState);
+    using GamepadVibrationSequenceUpdateDelegate = void(__fastcall*)(uint8_t* sequence);
+    using GamepadVibrationMergeDelegate = void(__fastcall*)(uint32_t gamepadIndex, const uint8_t* samples, int32_t sampleCount);
     using SphericalCameraUpdateDelegate = void(__fastcall*)(uint8_t* camera);
     using PolygonDemoUpdateDelegate = void(__fastcall*)(uint8_t* demo);
     using WindManagerUpdateDelegate = void(__fastcall*)(uint8_t* windManager);
@@ -29,6 +33,9 @@ namespace
 
     GetTargetFpsDelegate GetTargetFps = nullptr;
     FrameTimeUpdateDelegate FrameTimeUpdate = nullptr;
+    GamepadUpdateDelegate GamepadUpdate = nullptr;
+    GamepadVibrationSequenceUpdateDelegate GamepadVibrationSequenceUpdate = nullptr;
+    GamepadVibrationMergeDelegate GamepadVibrationMerge = nullptr;
     SphericalCameraUpdateDelegate SphericalCameraUpdate = nullptr;
     PolygonDemoUpdateDelegate PolygonDemoUpdate = nullptr;
     WindManagerUpdateDelegate WindManagerUpdate = nullptr;
@@ -45,6 +52,8 @@ namespace
     float* FrameDeltaSeconds = nullptr;
     int32_t* FrameTickDelta60 = nullptr;
     int32_t* FrameTickDelta300 = nullptr;
+    int32_t* GamepadVibrationRawTickDelta300 = nullptr;
+    uint8_t* GamepadVibrationOutputSamples = nullptr;
     double CharacterTickRemainder = 0.0;
 
     constexpr float ReferenceFps = 60.0f;
@@ -54,8 +63,14 @@ namespace
     constexpr float MaximumReasonableTaskStep = 0.1f;
     constexpr uint16_t DirectJacketPointCount = 58;
     constexpr uint32_t BandanaHairChainCount = 17;
+    constexpr size_t GamepadCount = 4;
+    constexpr size_t GamepadVibrationQueueSize = 0x40;
+    constexpr size_t GamepadVibrationQueueBytes = GamepadCount * GamepadVibrationQueueSize;
+    constexpr size_t GamepadMotorCount = 2;
+    constexpr int32_t GamepadVibrationTicksPerSample = 5;
     constexpr ptrdiff_t CameraTurnSpeedOffset = 0xC0;
     constexpr ptrdiff_t CharacterTickOffsetFromDelta = 0xC;
+    constexpr ptrdiff_t GamepadVibrationOutputLoadOffset = 0x64F;
     constexpr ptrdiff_t PolygonDemoTimelineResetOffset = 0x44588;
     constexpr ptrdiff_t ClothContextDeltaOffset = 0x30;
     constexpr ptrdiff_t ClothContextReciprocalDeltaOffset = 0x34;
@@ -85,6 +100,9 @@ namespace
 
     ExecutableSection GameText{};
     std::array<PhysicsWorldTimeState, PhysicsWorldTimeStateCount> PhysicsWorldTimeStates{};
+    std::array<uint8_t, GamepadVibrationQueueBytes> ActiveGamepadVibrationSamples{};
+    std::array<uint8_t, GamepadVibrationQueueBytes> PendingGamepadVibrationSamples{};
+    std::mutex GamepadVibrationMutex;
 
     bool FindTextSection()
     {
@@ -141,6 +159,84 @@ namespace
         const int32_t wholeTicks = static_cast<int32_t>(accumulatedTicks);
         CharacterTickRemainder = accumulatedTicks - wholeTicks;
         *FrameTickDelta300 = wholeTicks;
+    }
+
+    void MergeGamepadVibrationSamples(uint8_t* destination, const uint8_t* source, size_t count)
+    {
+        for (size_t index = 0; index < count; ++index)
+            destination[index] = std::max(destination[index], source[index]);
+    }
+
+    void __fastcall GamepadVibrationSequenceUpdateHook(uint8_t* sequence)
+    {
+        if (Config.targetFramerate <= ReferenceFps || !FrameTickDelta60 || !FrameTickDelta300 || !GamepadVibrationRawTickDelta300)
+        {
+            GamepadVibrationSequenceUpdate(sequence);
+            return;
+        }
+
+        const int32_t nativeTickCount = *FrameTickDelta60;
+        if (nativeTickCount <= 0)
+            return;
+
+        const int32_t originalRawTicks = *GamepadVibrationRawTickDelta300;
+        const int32_t originalScaledTicks = *FrameTickDelta300;
+        const int32_t rawTicks = std::clamp(nativeTickCount, 1, 6) * GamepadVibrationTicksPerSample;
+        int32_t scaledTicks = rawTicks;
+        if (originalRawTicks > 0)
+        {
+            const double timeScale = static_cast<double>(originalScaledTicks) / originalRawTicks;
+            scaledTicks = std::max(1, static_cast<int32_t>(std::lround(rawTicks * timeScale)));
+        }
+
+        *GamepadVibrationRawTickDelta300 = rawTicks;
+        *FrameTickDelta300 = scaledTicks;
+        GamepadVibrationSequenceUpdate(sequence);
+        *GamepadVibrationRawTickDelta300 = originalRawTicks;
+        *FrameTickDelta300 = originalScaledTicks;
+    }
+
+    void __fastcall GamepadVibrationMergeHook(uint32_t gamepadIndex, const uint8_t* samples, int32_t sampleCount)
+    {
+        if (Config.targetFramerate > ReferenceFps && gamepadIndex < GamepadCount && samples && sampleCount > 0)
+        {
+            const size_t samplesToMerge = static_cast<size_t>(std::min(sampleCount, 32));
+            uint8_t* destination = PendingGamepadVibrationSamples.data() + gamepadIndex * GamepadVibrationQueueSize;
+            std::lock_guard<std::mutex> lock(GamepadVibrationMutex);
+            MergeGamepadVibrationSamples(destination, samples, samplesToMerge * 2);
+
+            if (samplesToMerge > 1)
+            {
+                for (size_t motor = 0; motor < GamepadMotorCount; ++motor)
+                {
+                    if (samples[motor] == 0 || samples[GamepadMotorCount + motor] != 0)
+                        continue;
+
+                    destination[GamepadMotorCount + motor] =
+                        std::max(destination[GamepadMotorCount + motor], samples[motor]);
+                }
+            }
+        }
+
+        GamepadVibrationMerge(gamepadIndex, samples, sampleCount);
+    }
+
+    void __fastcall GamepadUpdateHook(uint32_t connectedMask, uint8_t* states, uint32_t* updatedMask, uint32_t resetMask, int32_t resetState)
+    {
+        if (Config.targetFramerate <= ReferenceFps || !GamepadVibrationOutputSamples)
+        {
+            GamepadUpdate(connectedMask, states, updatedMask, resetMask, resetState);
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(GamepadVibrationMutex);
+        MergeGamepadVibrationSamples(ActiveGamepadVibrationSamples.data(), PendingGamepadVibrationSamples.data(), GamepadVibrationQueueBytes);
+        PendingGamepadVibrationSamples.fill(0);
+        std::memcpy(GamepadVibrationOutputSamples, ActiveGamepadVibrationSamples.data(), ActiveGamepadVibrationSamples.size());
+
+        GamepadUpdate(connectedMask, states, updatedMask, resetMask, resetState);
+
+        std::memcpy(ActiveGamepadVibrationSamples.data(), GamepadVibrationOutputSamples, ActiveGamepadVibrationSamples.size());
     }
 
     void __fastcall SphericalCameraUpdateHook(uint8_t* camera)
@@ -433,6 +529,79 @@ namespace
         return true;
     }
 
+    bool InstallGamepadVibrationTimingFix()
+    {
+        constexpr char UpdatePattern[] = "44 89 4C 24 20 4C 89 44 24 18 48 89 54 24 10 89 4C 24 08 53 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 08 01 00 00 45 33 ED";
+        constexpr char SequenceUpdatePattern[] = "40 53 41 57 48 83 EC 48 48 8B D9 0F 29 74 24 30 48 8B 89 F8 00 00 00 F3 0F 10 35 ?? ?? ?? ?? 48 85 C9 74 0D 8B 01 25 00 10 00 00 0F 85 ?? ?? ?? ?? 48 89 74 24 70 B9 01 00 00 00";
+        constexpr char MergePattern[] = "48 8D 05 ?? ?? ?? ?? 44 8B D1 49 C1 E2 06 45 8B D8 4C 03 D0 4C 8B CA 33 C0 0F 1F 80 00 00 00 00 41 0F B6 0C 42 41 FF CB";
+        constexpr std::array<uint8_t, 3> OutputQueueLoadOpcode = {0x48, 0x8D, 0x1D};
+        constexpr std::array<uint8_t, 2> RawTickLoadOpcode = {0xF7, 0x2D};
+        constexpr std::array<uint8_t, 4> ScaledTickLoadOpcode = {0x66, 0x0F, 0x6E, 0x05};
+        constexpr ptrdiff_t DisplacementOffset = 3;
+        constexpr ptrdiff_t InstructionSize = 7;
+        constexpr ptrdiff_t RawTickLoadOffset = 0x56;
+        constexpr ptrdiff_t RawTickDisplacementOffset = RawTickLoadOffset + 2;
+        constexpr ptrdiff_t RawTickInstructionSize = 6;
+        constexpr ptrdiff_t ScaledTickLoadOffset = 0x64;
+        constexpr ptrdiff_t ScaledTickDisplacementOffset = ScaledTickLoadOffset + 4;
+        constexpr ptrdiff_t ScaledTickInstructionSize = 8;
+
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, UpdatePattern);
+        uint8_t* sequenceUpdate = Memory::PatternScanRange(GameText.begin, GameText.size, SequenceUpdatePattern);
+        uint8_t* merge = Memory::PatternScanRange(GameText.begin, GameText.size, MergePattern);
+
+        if (!update || !sequenceUpdate || !merge)
+            return false;
+
+        LogAddress("gamepadUpdate", reinterpret_cast<uintptr_t>(update));
+        LogAddress("gamepadVibrationSequenceUpdate", reinterpret_cast<uintptr_t>(sequenceUpdate));
+        LogAddress("gamepadVibrationMerge", reinterpret_cast<uintptr_t>(merge));
+
+        if (std::memcmp(sequenceUpdate + RawTickLoadOffset, RawTickLoadOpcode.data(), RawTickLoadOpcode.size()) != 0 ||
+            std::memcmp(sequenceUpdate + ScaledTickLoadOffset, ScaledTickLoadOpcode.data(), ScaledTickLoadOpcode.size()) != 0)
+        {
+            spdlog::error("MGS4 gamepad vibration sequence tick-load validation failed");
+            return false;
+        }
+
+        int32_t rawTickDisplacement = 0;
+        int32_t scaledTickDisplacement = 0;
+        std::memcpy(&rawTickDisplacement, sequenceUpdate + RawTickDisplacementOffset, sizeof(rawTickDisplacement));
+        std::memcpy(&scaledTickDisplacement, sequenceUpdate + ScaledTickDisplacementOffset, sizeof(scaledTickDisplacement));
+        GamepadVibrationRawTickDelta300 = reinterpret_cast<int32_t*>(sequenceUpdate + RawTickLoadOffset + RawTickInstructionSize + rawTickDisplacement);
+        int32_t* sequenceScaledTickDelta300 = reinterpret_cast<int32_t*>(sequenceUpdate + ScaledTickLoadOffset + ScaledTickInstructionSize + scaledTickDisplacement);
+        LogAddress("gamepadVibrationRawTickDelta300", reinterpret_cast<uintptr_t>(GamepadVibrationRawTickDelta300));
+        if (sequenceScaledTickDelta300 != FrameTickDelta300)
+        {
+            spdlog::error("MGS4 gamepad vibration scaled tick is not the known 300 Hz frame tick");
+            return false;
+        }
+
+        uint8_t* outputQueueLoad = update + GamepadVibrationOutputLoadOffset;
+        if (std::memcmp(outputQueueLoad, OutputQueueLoadOpcode.data(), OutputQueueLoadOpcode.size()) != 0)
+        {
+            spdlog::error("MGS4 gamepad vibration output-queue load validation failed");
+            return false;
+        }
+
+        int32_t outputDisplacement = 0;
+        std::memcpy(&outputDisplacement, outputQueueLoad + DisplacementOffset, sizeof(outputDisplacement));
+        GamepadVibrationOutputSamples = outputQueueLoad + InstructionSize + outputDisplacement;
+        LogAddress("gamepadVibrationOutputSamples", reinterpret_cast<uintptr_t>(GamepadVibrationOutputSamples));
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&GamepadUpdateHook), reinterpret_cast<void**>(&GamepadUpdate)) != MH_OK)
+            return false;
+
+        if (MH_CreateHook(sequenceUpdate, reinterpret_cast<LPVOID>(&GamepadVibrationSequenceUpdateHook), reinterpret_cast<void**>(&GamepadVibrationSequenceUpdate)) != MH_OK)
+            return false;
+
+        if (MH_CreateHook(merge, reinterpret_cast<LPVOID>(&GamepadVibrationMergeHook), reinterpret_cast<void**>(&GamepadVibrationMerge)) != MH_OK)
+            return false;
+
+        spdlog::info("Gamepad vibration timing fix applied");
+        return true;
+    }
+
     bool InstallSphericalCameraTimingFix()
     {
         constexpr char Pattern[] = "48 89 5C 24 10 56 48 83 EC 30 48 8B D9 48 89 7C 24 40 8B 89 A8 00 00 00 33 F6 85 C9 0F 84 ?? ?? ?? ?? 83 E9 01 0F 84 ?? ?? ?? ?? 83 E9 01 74 ?? 83 F9 01 0F 85 ?? ?? ?? ?? F3 0F 10 05 ?? ?? ?? ??";
@@ -685,6 +854,8 @@ void MGS4_Initialize()
         spdlog::error("Failed to install the spherical camera timing fix");
     if (!InstallCharacterControlTimingFix())
         spdlog::error("Failed to install the character control timing fix");
+    if (!InstallGamepadVibrationTimingFix())
+        spdlog::error("Failed to install the gamepad vibration timing fix");
     if (!InstallPolygonDemoTimingFix())
         spdlog::error("Failed to install the polygon-demo timing fix");
     if (!InstallWindManagerTimingFix())
