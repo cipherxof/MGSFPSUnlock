@@ -1,5 +1,11 @@
 # MGSFPSUnlock
-This is an experimental mod that allows you to play Metal Gear Solid 3 at framerates above (and below) 60. This mod is a work in progress so you should expect there to be issues.
+This is an experimental mod that allows you to play Metal Gear Solid games at framerates above (and below) 60. This mod is a work in progress so you should expect there to be issues.
+
+## Supported Games
+
+- [x] MGS4
+- [x] MGS3
+- [ ] MGS2
 
 ## How to use
 
@@ -10,7 +16,7 @@ This is an experimental mod that allows you to play Metal Gear Solid 3 at framer
 
 ## Steam Deck/Linux Additional Instructions
 🚩**You do not need to do this if you are using Windows!**
-- Open up the game properties of MGS2/MGS3 in Steam and add `WINEDLLOVERRIDES="wininet,winhttp=n,b" %command%` to the launch options.
+- Open up the game properties in Steam and add `WINEDLLOVERRIDES="wininet,winhttp=n,b" %command%` to the launch options.
 
 ## Building
 
