@@ -31,6 +31,7 @@ namespace
     using PhysicsWorldTimeStepDelegate = void(__fastcall*)(uint8_t* world, float deltaTime);
     using NpcRagdollContactUpdateDelegate = void(__fastcall*)(uint8_t* result, uint8_t* character);
     using RagdollRadialForceDelegate = void(__fastcall*)(uint8_t* controller, const float* position, float strength);
+    using RagdollBodyForceDelegate = void(__fastcall*)(uint8_t* controller, const float* position, float strength, int32_t bodyIndex);
 
     GetTargetFpsDelegate GetTargetFps = nullptr;
     FrameTimeUpdateDelegate FrameTimeUpdate = nullptr;
@@ -49,6 +50,7 @@ namespace
     PhysicsWorldTimeStepDelegate PhysicsWorldTimeStep = nullptr;
     NpcRagdollContactUpdateDelegate NpcRagdollContactUpdate = nullptr;
     RagdollRadialForceDelegate RagdollRadialForce = nullptr;
+    RagdollBodyForceDelegate RagdollBodyForce = nullptr;
 
     float* FrameDeltaSeconds = nullptr;
     int32_t* FrameTickDelta60 = nullptr;
@@ -497,7 +499,7 @@ namespace
         }
     }
 
-    void __fastcall RagdollRadialForceHook(uint8_t* controller, const float* position, float strength)
+    void NormalizeActiveNpcRagdollVelocity(uint8_t* controller)
     {
         const float frameDelta = FrameDeltaSeconds ? *FrameDeltaSeconds : 0.0f;
         const float velocityScale = frameDelta * ReferenceFps;
@@ -507,8 +509,18 @@ namespace
             uint8_t* ragdoll = controller ? *reinterpret_cast<uint8_t**>(controller + NpcRagdollPointerOffset) : nullptr;
             ScaleNpcRagdollVelocity(ragdoll, velocityScale);
         }
+    }
 
+    void __fastcall RagdollRadialForceHook(uint8_t* controller, const float* position, float strength)
+    {
+        NormalizeActiveNpcRagdollVelocity(controller);
         RagdollRadialForce(controller, position, strength);
+    }
+
+    void __fastcall RagdollBodyForceHook(uint8_t* controller, const float* position, float strength, int32_t bodyIndex)
+    {
+        NormalizeActiveNpcRagdollVelocity(controller);
+        RagdollBodyForce(controller, position, strength, bodyIndex);
     }
 
     void __fastcall NpcRagdollContactUpdateHook(uint8_t* result, uint8_t* character)
@@ -822,19 +834,24 @@ namespace
     {
         constexpr char UpdatePattern[] = "48 89 5C 24 18 55 56 41 56 48 83 EC 30 48 8B B2 40 44 00 00 4C 8B F1 48 8B AA 30 44 00 00 48 8B CA 48 8B DA E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 84 C0 74 ?? 81 8B 04 44 00 00 00 00 40 00";
         constexpr char RadialForcePattern[] = "48 8B C4 48 89 68 10 48 89 70 18 57 48 81 EC 10 01 00 00 0F 28 05 ?? ?? ?? ?? 48 8B EA 48 8B 79 30 48 8B F1 0F 28 0D ?? ?? ?? ?? 44 0F 29 40 C8 44 0F 28 C2 0F 11 44 24 30";
+        constexpr char BodyForcePattern[] = "4C 8B DC 48 81 EC B8 00 00 00 0F 28 0D ?? ?? ?? ?? 4C 8B D1 0F 28 05 ?? ?? ?? ?? 4C 8B 41 30 45 0F 29 4B B8 44 0F 28 CA 0F 11 44 24 30";
         uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, UpdatePattern);
         uint8_t* radialForce = Memory::PatternScanRange(GameText.begin, GameText.size, RadialForcePattern);
-        if (!update || !radialForce)
+        uint8_t* bodyForce = Memory::PatternScanRange(GameText.begin, GameText.size, BodyForcePattern);
+        if (!update || !radialForce || !bodyForce)
             return false;
         LogAddress("npcRagdollContactUpdate", reinterpret_cast<uintptr_t>(update));
         LogAddress("ragdollRadialForce", reinterpret_cast<uintptr_t>(radialForce));
+        LogAddress("ragdollBodyForce", reinterpret_cast<uintptr_t>(bodyForce));
 
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&NpcRagdollContactUpdateHook), reinterpret_cast<void**>(&NpcRagdollContactUpdate)) != MH_OK)
             return false;
         if (MH_CreateHook(radialForce, reinterpret_cast<LPVOID>(&RagdollRadialForceHook), reinterpret_cast<void**>(&RagdollRadialForce)) != MH_OK)
             return false;
+        if (MH_CreateHook(bodyForce, reinterpret_cast<LPVOID>(&RagdollBodyForceHook), reinterpret_cast<void**>(&RagdollBodyForce)) != MH_OK)
+            return false;
 
-        spdlog::info("Ragdoll contact velocity normalized");
+        spdlog::info("Ragdoll contact velocities normalized");
         return true;
     }
 
