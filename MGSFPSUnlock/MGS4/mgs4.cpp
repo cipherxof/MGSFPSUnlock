@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -61,6 +62,8 @@ namespace
     constexpr float ClothReferenceStep = 0.016683351f;
     constexpr float CameraTurnDecay = 0.70710677f;
     constexpr float MaximumReasonableTaskStep = 0.1f;
+    constexpr uint32_t BandanaHairChainCount = 17;
+    constexpr uint16_t DirectJacketPointCount = 58;
     constexpr size_t GamepadCount = 4;
     constexpr size_t GamepadVibrationQueueSize = 0x40;
     constexpr size_t GamepadVibrationQueueBytes = GamepadCount * GamepadVibrationQueueSize;
@@ -72,6 +75,7 @@ namespace
     constexpr ptrdiff_t PolygonDemoTimelineResetOffset = 0x44588;
     constexpr ptrdiff_t ClothContextDeltaOffset = 0x30;
     constexpr ptrdiff_t ClothContextReciprocalDeltaOffset = 0x34;
+    constexpr ptrdiff_t StripSolverPointCountOffset = 0x110;
     constexpr ptrdiff_t PhysicsFixedStepOffset = 0x670;
     constexpr ptrdiff_t NpcRagdollPointerOffset = 0x30;
     constexpr size_t NpcRagdollBodyCount = 13;
@@ -99,6 +103,8 @@ namespace
     std::array<PhysicsWorldTimeState, PhysicsWorldTimeStateCount> PhysicsWorldTimeStates{};
     std::array<uint8_t, GamepadVibrationQueueBytes> ActiveGamepadVibrationSamples{};
     std::array<uint8_t, GamepadVibrationQueueBytes> PendingGamepadVibrationSamples{};
+    std::atomic<uint64_t> RenderFrameSerial{0};
+    std::atomic<uint64_t> PolygonDemoFrameSerial{0};
     std::mutex GamepadVibrationMutex;
 
     bool FindTextSection()
@@ -130,6 +136,23 @@ namespace
         return Config.targetFramerate <= ReferenceFps || !FrameTickDelta60 || *FrameTickDelta60 != 0;
     }
 
+    bool IsPolygonDemoActive()
+    {
+        const uint64_t currentFrame = RenderFrameSerial.load(std::memory_order_relaxed);
+        const uint64_t polygonDemoFrame = PolygonDemoFrameSerial.load(std::memory_order_relaxed);
+        return polygonDemoFrame != 0 && currentFrame >= polygonDemoFrame && currentFrame - polygonDemoFrame <= 1;
+    }
+
+    uint8_t* GetFirstClothObject(const uint8_t* owner, ptrdiff_t listOffset)
+    {
+        const uint8_t* list = owner ? *reinterpret_cast<uint8_t* const*>(owner + listOffset) : nullptr;
+        if (!list || *reinterpret_cast<const int32_t*>(list) <= 0)
+            return nullptr;
+
+        uint8_t* const* objects = *reinterpret_cast<uint8_t* const* const*>(list + 0x10);
+        return objects ? objects[0] : nullptr;
+    }
+
     int __fastcall GetTargetFpsHook()
     {
         return Config.targetFramerate;
@@ -138,6 +161,7 @@ namespace
     void __fastcall FrameTimeUpdateHook()
     {
         FrameTimeUpdate();
+        RenderFrameSerial.fetch_add(1, std::memory_order_relaxed);
 
         if (Config.targetFramerate <= ReferenceFps || !FrameDeltaSeconds || !FrameTickDelta300)
         {
@@ -262,6 +286,7 @@ namespace
 
     void __fastcall PolygonDemoUpdateHook(uint8_t* demo)
     {
+        PolygonDemoFrameSerial.store(RenderFrameSerial.load(std::memory_order_relaxed), std::memory_order_relaxed);
         const bool timelineReset = demo && *reinterpret_cast<int32_t*>(demo + PolygonDemoTimelineResetOffset) != 0;
         if (timelineReset || IsNativeTick())
             PolygonDemoUpdate(demo);
@@ -279,20 +304,23 @@ namespace
         if (!taskStep)
             return stepCount;
 
+        const float stockStep = *taskStep;
+
         if (ActiveHairTiming && Config.targetFramerate > ReferenceFps)
         {
             *taskStep = ClothReferenceStep;
-            return std::min(1u, maxSteps);
+            stepCount = std::min(1u, maxSteps);
         }
-
-        const float stockStep = *taskStep;
-        const float exactDelta = FrameDeltaSeconds ? *FrameDeltaSeconds : 0.0f;
-        const bool useExactDelta = !ActiveClothManagerTiming && !ActiveClothProducerTiming && exactDelta > 0.0f && std::isfinite(exactDelta) &&
-                                   stockStep > exactDelta && stockStep <= MaximumReasonableTaskStep && std::isfinite(stockStep);
-        if (useExactDelta)
+        else
         {
-            *taskStep = exactDelta;
-            stepCount = 1;
+            const float exactDelta = FrameDeltaSeconds ? *FrameDeltaSeconds : 0.0f;
+            const bool useExactDelta = !ActiveClothManagerTiming && !ActiveClothProducerTiming && exactDelta > 0.0f && std::isfinite(exactDelta) &&
+                                       stockStep > exactDelta && stockStep <= MaximumReasonableTaskStep && std::isfinite(stockStep);
+            if (useExactDelta)
+            {
+                *taskStep = exactDelta;
+                stepCount = 1;
+            }
         }
 
         return stepCount;
@@ -300,25 +328,28 @@ namespace
 
     void __fastcall ClothManagerUpdateHook(uint8_t* manager, float updateArgument, int32_t updateType)
     {
-        if (IsNativeTick())
-        {
-            const bool previousTiming = ActiveClothManagerTiming;
-            ActiveClothManagerTiming = true;
-            ClothManagerUpdate(manager, updateArgument, updateType);
-            ActiveClothManagerTiming = previousTiming;
-        }
-        else if (manager && ClothTransformPublish)
-        {
-            ClothTransformPublish(manager);
-        }
+        const bool previousTiming = ActiveClothManagerTiming;
+        ActiveClothManagerTiming = true;
+        ClothManagerUpdate(manager, updateArgument, updateType);
+        ActiveClothManagerTiming = previousTiming;
     }
 
     void __fastcall ClothProducerUpdateHook(uint8_t* producer, float updateArgument, int32_t updateType)
     {
-        if (IsNativeTick())
+        const bool nativeTick = IsNativeTick();
+        const uint8_t* firstObject = GetFirstClothObject(producer, 0x08);
+        const uint32_t pointCount = firstObject
+            ? *reinterpret_cast<const uint16_t*>(firstObject + StripSolverPointCountOffset)
+            : 0;
+        const bool managerBacked = ActiveClothManagerTiming;
+        const bool cutsceneSevenPoint = pointCount == 7 && IsPolygonDemoActive();
+        const bool usePerRenderDelta = !managerBacked && (pointCount == 10 || (pointCount == 7 && !cutsceneSevenPoint));
+        const bool forwardUpdate = usePerRenderDelta || nativeTick;
+
+        if (forwardUpdate)
         {
             const bool previousTiming = ActiveClothProducerTiming;
-            ActiveClothProducerTiming = true;
+            ActiveClothProducerTiming = !usePerRenderDelta;
             ClothProducerUpdate(producer, updateArgument, updateType);
             ActiveClothProducerTiming = previousTiming;
         }
@@ -340,7 +371,10 @@ namespace
 
     void __fastcall DirectResidentClothUpdateHook(uint8_t* cloth, uint8_t* context)
     {
-        const bool fixedRate = cloth && Config.targetFramerate > ReferenceFps && FrameTickDelta60;
+        const uint16_t pointCount = cloth ? *reinterpret_cast<uint16_t*>(cloth) : 0;
+        const bool fixedRate = pointCount == DirectJacketPointCount &&
+                               Config.targetFramerate > ReferenceFps && FrameTickDelta60;
+        const bool nativeTick = IsNativeTick();
 
         if (!fixedRate)
         {
@@ -348,7 +382,7 @@ namespace
             return;
         }
 
-        if (!IsNativeTick())
+        if (!nativeTick)
         {
             PublishDirectResidentClothTransform(cloth);
             return;
@@ -373,8 +407,9 @@ namespace
 
     void __fastcall HairSimulationUpdateHook(uint8_t* hair)
     {
+        const uint32_t chainCount = hair ? *reinterpret_cast<uint32_t*>(hair + 0x260) : 0;
         const bool previousTiming = ActiveHairTiming;
-        ActiveHairTiming = hair && Config.targetFramerate > ReferenceFps;
+        ActiveHairTiming = chainCount == BandanaHairChainCount && Config.targetFramerate > ReferenceFps;
         HairSimulationUpdate(hair);
         ActiveHairTiming = previousTiming;
     }
@@ -512,7 +547,7 @@ namespace
 
         if (!FrameDeltaSeconds)
         {
-            spdlog::error("MGS4 character timing requires the frame delta");
+            spdlog::error("Character timing requires the frame delta");
             return false;
         }
 
@@ -562,7 +597,7 @@ namespace
         if (std::memcmp(sequenceUpdate + RawTickLoadOffset, RawTickLoadOpcode.data(), RawTickLoadOpcode.size()) != 0 ||
             std::memcmp(sequenceUpdate + ScaledTickLoadOffset, ScaledTickLoadOpcode.data(), ScaledTickLoadOpcode.size()) != 0)
         {
-            spdlog::error("MGS4 gamepad vibration sequence tick-load validation failed");
+            spdlog::error("Gamepad vibration sequence tick-load validation failed");
             return false;
         }
 
@@ -575,14 +610,14 @@ namespace
         LogAddress("gamepadVibrationRawTickDelta300", reinterpret_cast<uintptr_t>(GamepadVibrationRawTickDelta300));
         if (sequenceScaledTickDelta300 != FrameTickDelta300)
         {
-            spdlog::error("MGS4 gamepad vibration scaled tick is not the known 300 Hz frame tick");
+            spdlog::error("Gamepad vibration scaled tick is not the known 300 Hz frame tick");
             return false;
         }
 
         uint8_t* outputQueueLoad = update + GamepadVibrationOutputLoadOffset;
         if (std::memcmp(outputQueueLoad, OutputQueueLoadOpcode.data(), OutputQueueLoadOpcode.size()) != 0)
         {
-            spdlog::error("MGS4 gamepad vibration output-queue load validation failed");
+            spdlog::error("Gamepad vibration output-queue load validation failed");
             return false;
         }
 
@@ -651,7 +686,7 @@ namespace
         LogAddress("polygonDemoUpdate", reinterpret_cast<uintptr_t>(update));
         if (std::memcmp(update + TimeDeltaLoadOffset, TimeDeltaLoadOpcode.data(), TimeDeltaLoadOpcode.size()) != 0)
         {
-            spdlog::error("MGS4 polygon-demo time-delta load validation failed");
+            spdlog::error("Polygon-demo time-delta load validation failed");
             return false;
         }
 
@@ -665,7 +700,7 @@ namespace
             return false;
         }
 
-        spdlog::info("Polygon demos fix applied");
+        spdlog::info("Polygon demos and cutscene seven-point strip physics advance on native 60 Hz ticks");
         return true;
     }
 
@@ -710,7 +745,7 @@ namespace
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&ClothManagerUpdateHook), reinterpret_cast<void**>(&ClothManagerUpdate)) != MH_OK)
             return false;
 
-        spdlog::info("Manager-backed strip-cloth simulation advances at 60 Hz while transforms publish per-render");
+        spdlog::info("Manager-backed strip-cloth preparation remains per-render");
         return true;
     }
 
@@ -733,45 +768,30 @@ namespace
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&ClothProducerUpdateHook), reinterpret_cast<void**>(&ClothProducerUpdate)) != MH_OK)
             return false;
 
-        spdlog::info("Shared strip-cloth simulation advances at 60 Hz while transforms publish per-render");
+        spdlog::info("Seven- and ten-point standalone strip-cloth use the per-render delta; other producers advance at 60 Hz");
         return true;
     }
 
     bool InstallDirectResidentClothTimingFix()
     {
         constexpr char Pattern[] = "48 8B C4 55 53 48 8D A8 78 FE FF FF 48 81 EC 78 02 00 00 4C 8B 89 58 04 00 00 48 8B D9 44 0F B7 42 3C 48 89 78 18 48 8B FA 4C 89 68 E8";
-        constexpr ptrdiff_t SimulationCallOffset = 0x18C;
 
         uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
         if (!update)
             return false;
         LogAddress("directResidentClothUpdate", reinterpret_cast<uintptr_t>(update));
 
-        uint8_t* simulationCall = update + SimulationCallOffset;
-        if (*simulationCall != 0xE8)
-        {
-            spdlog::error("MGS4 direct resident-cloth integration-call validation failed");
-            return false;
-        }
-
-        const uintptr_t integrationRva = reinterpret_cast<uintptr_t>(GetRelativeOffset(simulationCall + 1)) - reinterpret_cast<uintptr_t>(GameModule);
-        if (integrationRva != 0x629400)
-        {
-            spdlog::error("MGS4 direct resident-cloth integration target is unexpected: {:#x}", integrationRva);
-            return false;
-        }
-
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&DirectResidentClothUpdateHook), reinterpret_cast<void**>(&DirectResidentClothUpdate)) != MH_OK)
             return false;
 
-        spdlog::info("Direct resident-cloth simulation advances at 60 Hz while transforms publish per-render");
+        spdlog::info("58-point direct-jacket simulation advances at 60 Hz while transforms publish per-render");
         return true;
     }
 
     bool InstallHairTimingFix()
     {
-        constexpr char Pattern[] = "40 53 48 81 EC D0 00 00 00 48 8B D9 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 81 48 02 00 00 48 85 C0 74 ?? 44 8B 40 08 48 8B 91 98 02 00 00 48 8B 89 90 02 00 00 49 C1 E0 05 E8 ?? ?? ?? ??";
-        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        constexpr char UpdatePattern[] = "40 53 48 81 EC D0 00 00 00 48 8B D9 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 81 48 02 00 00 48 85 C0 74 ?? 44 8B 40 08 48 8B 91 98 02 00 00 48 8B 89 90 02 00 00 49 C1 E0 05 E8 ?? ?? ?? ??";
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, UpdatePattern);
         if (!update)
             return false;
         LogAddress("hairSimulationUpdate", reinterpret_cast<uintptr_t>(update));
@@ -779,7 +799,7 @@ namespace
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&HairSimulationUpdateHook), reinterpret_cast<void**>(&HairSimulationUpdate)) != MH_OK)
             return false;
 
-        spdlog::info("All hair and articulated-chain tasks use the native normalized solver step");
+        spdlog::info("Bandana and 17-node hair timing uses the proven 0.1.0 per-render update policy");
         return true;
     }
 
@@ -823,7 +843,7 @@ namespace
         uint8_t* target = FindTargetFps();
         if (!target)
         {
-            spdlog::error("Failed to find the MGS4 target FPS function");
+            spdlog::error("Failed to find the target FPS function");
             return false;
         }
         LogAddress("getTargetFps", reinterpret_cast<uintptr_t>(target));
@@ -851,7 +871,7 @@ void MGS4_Initialize()
 
     if (!InstallFrameRateHook())
     {
-        spdlog::error("Failed to initialize the MGS4 framerate unlocker");
+        spdlog::error("Failed to initialize the framerate unlocker");
         return;
     }
 
@@ -885,10 +905,10 @@ void MGS4_Initialize()
     const MH_STATUS status = MH_EnableHook(MH_ALL_HOOKS);
     if (status != MH_OK)
     {
-        spdlog::error("Failed to enable one or more MGS4 hooks, status: {}", static_cast<int>(status));
+        spdlog::error("Failed to enable one or more hooks, status: {}", static_cast<int>(status));
         MH_Uninitialize();
         return;
     }
 
-    spdlog::info("All MGS4 hooks installed successfully");
+    spdlog::info("All hooks installed successfully");
 }
