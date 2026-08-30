@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <mutex>
 
 namespace
@@ -26,6 +27,8 @@ namespace
     using ClothManagerUpdateDelegate = void(__fastcall*)(uint8_t* manager, float updateArgument, int32_t updateType);
     using ClothProducerUpdateDelegate = void(__fastcall*)(uint8_t* producer, float updateArgument, int32_t updateType);
     using ClothTransformPublishDelegate = void(__fastcall*)(uint8_t* producer);
+    using DirectResidentClothOwnerUpdateDelegate = void(__fastcall*)(uint8_t* owner);
+    using DirectResidentClothBonePublishDelegate = void(__fastcall*)(uint8_t* cloth, uint8_t** particleBuffer);
     using DirectResidentClothUpdateDelegate = void(__fastcall*)(uint8_t* cloth, uint8_t* context);
     using HairSimulationUpdateDelegate = void(__fastcall*)(uint8_t* hair);
     using PhysicsWorldTimeStepDelegate = void(__fastcall*)(uint8_t* world, float deltaTime);
@@ -45,6 +48,8 @@ namespace
     ClothManagerUpdateDelegate ClothManagerUpdate = nullptr;
     ClothProducerUpdateDelegate ClothProducerUpdate = nullptr;
     ClothTransformPublishDelegate ClothTransformPublish = nullptr;
+    DirectResidentClothOwnerUpdateDelegate DirectResidentClothOwnerUpdate = nullptr;
+    DirectResidentClothBonePublishDelegate DirectResidentClothBonePublish = nullptr;
     DirectResidentClothUpdateDelegate DirectResidentClothUpdate = nullptr;
     HairSimulationUpdateDelegate HairSimulationUpdate = nullptr;
     PhysicsWorldTimeStepDelegate PhysicsWorldTimeStep = nullptr;
@@ -60,32 +65,18 @@ namespace
     double CharacterTickRemainder = 0.0;
 
     constexpr float ReferenceFps = 60.0f;
-    constexpr float CharacterTickRate = 300.0f;
-    constexpr float ClothReferenceStep = 0.016683351f;
+    constexpr float NativeSimulationStepSeconds = 0.016683351f;
     constexpr float CameraTurnDecay = 0.70710677f;
     constexpr float MaximumReasonableTaskStep = 0.1f;
-    constexpr uint32_t BandanaHairChainCount = 17;
-    constexpr uint16_t DirectJacketPointCount = 58;
     constexpr size_t GamepadCount = 4;
     constexpr size_t GamepadVibrationQueueSize = 0x40;
     constexpr size_t GamepadVibrationQueueBytes = GamepadCount * GamepadVibrationQueueSize;
     constexpr size_t GamepadMotorCount = 2;
-    constexpr int32_t GamepadVibrationTicksPerSample = 5;
-    constexpr ptrdiff_t CameraTurnSpeedOffset = 0xC0;
-    constexpr ptrdiff_t CharacterTickOffsetFromDelta = 0xC;
-    constexpr ptrdiff_t GamepadVibrationOutputLoadOffset = 0x64F;
-    constexpr ptrdiff_t PolygonDemoTimelineResetOffset = 0x44588;
-    constexpr ptrdiff_t ClothContextDeltaOffset = 0x30;
-    constexpr ptrdiff_t ClothContextReciprocalDeltaOffset = 0x34;
-    constexpr ptrdiff_t StripSolverPointCountOffset = 0x110;
-    constexpr ptrdiff_t PhysicsFixedStepOffset = 0x670;
-    constexpr ptrdiff_t NpcRagdollPointerOffset = 0x30;
-    constexpr size_t NpcRagdollBodyCount = 13;
     constexpr size_t PhysicsWorldTimeStateCount = 8;
 
     thread_local bool ActiveClothManagerTiming = false;
     thread_local bool ActiveClothProducerTiming = false;
-    thread_local bool ActiveHairTiming = false;
+    thread_local bool ActiveBandanaTiming = false;
     thread_local bool ActiveNpcRagdollContactUpdate = false;
 
     struct ExecutableSection
@@ -145,14 +136,59 @@ namespace
         return polygonDemoFrame != 0 && currentFrame >= polygonDemoFrame && currentFrame - polygonDemoFrame <= 1;
     }
 
+    bool IsReadableRange(const void* address, size_t size)
+    {
+        if (!address || size == 0)
+            return false;
+
+        const uintptr_t begin = reinterpret_cast<uintptr_t>(address);
+        if (size > std::numeric_limits<uintptr_t>::max() - begin)
+            return false;
+
+        const uintptr_t end = begin + size;
+        uintptr_t cursor = begin;
+        while (cursor < end)
+        {
+            MEMORY_BASIC_INFORMATION memory{};
+            if (VirtualQuery(reinterpret_cast<const void*>(cursor), &memory, sizeof(memory)) != sizeof(memory) ||
+                memory.State != MEM_COMMIT || (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
+                return false;
+
+            const uintptr_t regionBegin = reinterpret_cast<uintptr_t>(memory.BaseAddress);
+            if (memory.RegionSize > std::numeric_limits<uintptr_t>::max() - regionBegin)
+                return false;
+
+            const uintptr_t regionEnd = regionBegin + memory.RegionSize;
+            if (cursor < regionBegin || regionEnd <= cursor)
+                return false;
+
+            cursor = std::min(end, regionEnd);
+        }
+
+        return true;
+    }
+
     uint8_t* GetFirstClothObject(const uint8_t* owner, ptrdiff_t listOffset)
     {
-        const uint8_t* list = owner ? *reinterpret_cast<uint8_t* const*>(owner + listOffset) : nullptr;
-        if (!list || *reinterpret_cast<const int32_t*>(list) <= 0)
+        if (!owner || !IsReadableRange(owner + listOffset, sizeof(uint8_t*)))
+            return nullptr;
+
+        const uint8_t* list = *reinterpret_cast<uint8_t* const*>(owner + listOffset);
+        if (!list || !IsReadableRange(list, 0x10 + sizeof(uint8_t**)))
+            return nullptr;
+
+        const int32_t count = *reinterpret_cast<const int32_t*>(list);
+        if (count <= 0 || count > 4096)
             return nullptr;
 
         uint8_t* const* objects = *reinterpret_cast<uint8_t* const* const*>(list + 0x10);
-        return objects ? objects[0] : nullptr;
+        return objects && IsReadableRange(objects, sizeof(uint8_t*)) ? objects[0] : nullptr;
+    }
+
+    uint16_t GetStripSolverPointCount(const uint8_t* solver)
+    {
+        const uint8_t* count = solver ? solver + 0x110 : nullptr;
+        return IsReadableRange(count, sizeof(uint16_t)) ? *reinterpret_cast<const uint16_t*>(count) : 0;
     }
 
     int __fastcall GetTargetFpsHook()
@@ -171,7 +207,7 @@ namespace
             return;
         }
 
-        const float exactTicks = *FrameDeltaSeconds * CharacterTickRate;
+        const float exactTicks = *FrameDeltaSeconds * 300.0f;
         if (exactTicks < 1.0f || !std::isfinite(exactTicks))
         {
             CharacterTickRemainder = 0.0;
@@ -204,7 +240,7 @@ namespace
 
         const int32_t originalRawTicks = *GamepadVibrationRawTickDelta300;
         const int32_t originalScaledTicks = *FrameTickDelta300;
-        const int32_t rawTicks = std::clamp(nativeTickCount, 1, 6) * GamepadVibrationTicksPerSample;
+        const int32_t rawTicks = std::clamp(nativeTickCount, 1, 6) * 5;
         int32_t scaledTicks = rawTicks;
         if (originalRawTicks > 0)
         {
@@ -279,7 +315,7 @@ namespace
 
         const float frameDecay = std::pow(CameraTurnDecay, deltaTime * ReferenceFps);
         const float turnRateScale = (1.0f - frameDecay) / (1.0f - CameraTurnDecay);
-        float* turnSpeed = reinterpret_cast<float*>(camera + CameraTurnSpeedOffset);
+        float* turnSpeed = reinterpret_cast<float*>(camera + 0xC0);
         const float originalTurnSpeed = *turnSpeed;
         *turnSpeed *= turnRateScale;
         SphericalCameraUpdate(camera);
@@ -289,7 +325,7 @@ namespace
     void __fastcall PolygonDemoUpdateHook(uint8_t* demo)
     {
         PolygonDemoFrameSerial.store(RenderFrameSerial.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        const bool timelineReset = demo && *reinterpret_cast<int32_t*>(demo + PolygonDemoTimelineResetOffset) != 0;
+        const bool timelineReset = demo && *reinterpret_cast<int32_t*>(demo + 0x44588) != 0;
         if (timelineReset || IsNativeTick())
             PolygonDemoUpdate(demo);
     }
@@ -307,16 +343,17 @@ namespace
             return stepCount;
 
         const float stockStep = *taskStep;
+        const float exactDelta = FrameDeltaSeconds ? *FrameDeltaSeconds : 0.0f;
+        const bool validExactDelta = exactDelta > 0.0f && exactDelta <= MaximumReasonableTaskStep && std::isfinite(exactDelta);
 
-        if (ActiveHairTiming && Config.targetFramerate > ReferenceFps)
+        if (ActiveBandanaTiming && Config.targetFramerate > ReferenceFps && maxSteps != 0)
         {
-            *taskStep = ClothReferenceStep;
+            *taskStep = NativeSimulationStepSeconds;
             stepCount = std::min(1u, maxSteps);
         }
         else
         {
-            const float exactDelta = FrameDeltaSeconds ? *FrameDeltaSeconds : 0.0f;
-            const bool useExactDelta = !ActiveClothManagerTiming && !ActiveClothProducerTiming && exactDelta > 0.0f && std::isfinite(exactDelta) &&
+            const bool useExactDelta = !ActiveClothManagerTiming && !ActiveClothProducerTiming && validExactDelta &&
                                        stockStep > exactDelta && stockStep <= MaximumReasonableTaskStep && std::isfinite(stockStep);
             if (useExactDelta)
             {
@@ -340,15 +377,13 @@ namespace
     {
         const bool nativeTick = IsNativeTick();
         const uint8_t* firstObject = GetFirstClothObject(producer, 0x08);
-        const uint32_t pointCount = firstObject
-            ? *reinterpret_cast<const uint16_t*>(firstObject + StripSolverPointCountOffset)
-            : 0;
+        const uint32_t pointCount = GetStripSolverPointCount(firstObject);
         const bool managerBacked = ActiveClothManagerTiming;
         const bool cutsceneSevenPoint = pointCount == 7 && IsPolygonDemoActive();
         const bool usePerRenderDelta = !managerBacked && (pointCount == 10 || (pointCount == 7 && !cutsceneSevenPoint));
-        const bool forwardUpdate = usePerRenderDelta || nativeTick;
+        const bool simulated = usePerRenderDelta || nativeTick;
 
-        if (forwardUpdate)
+        if (simulated)
         {
             const bool previousTiming = ActiveClothProducerTiming;
             ActiveClothProducerTiming = !usePerRenderDelta;
@@ -371,49 +406,89 @@ namespace
             std::memcpy(cloth + 0x4B0, sourceTransform, 0x40);
     }
 
+    void PublishDirectResidentClothBones(uint8_t* owner, uint8_t* cloth)
+    {
+        if (!owner || !cloth || !DirectResidentClothBonePublish ||
+            !IsReadableRange(owner + 0xC0, sizeof(uint32_t)))
+            return;
+
+        const uint32_t pingPong = *reinterpret_cast<uint32_t*>(owner + 0xC0) & 1;
+        uint8_t** particleBufferSlot = reinterpret_cast<uint8_t**>(
+            cloth + 0x08 + pingPong * sizeof(uint8_t*));
+        if (!IsReadableRange(particleBufferSlot, sizeof(uint8_t*)) || !*particleBufferSlot)
+            return;
+
+        uint8_t* particleBuffer = *particleBufferSlot;
+        DirectResidentClothBonePublish(cloth, &particleBuffer);
+    }
+
+    void __fastcall DirectResidentClothOwnerUpdateHook(uint8_t* owner)
+    {
+        uint8_t* cloth = owner && IsReadableRange(owner + 0x90, sizeof(uint8_t*))
+            ? *reinterpret_cast<uint8_t**>(owner + 0x90)
+            : nullptr;
+        const uint16_t pointCount = cloth && IsReadableRange(cloth, sizeof(uint16_t))
+            ? *reinterpret_cast<uint16_t*>(cloth)
+            : 0;
+        const bool directCloth = pointCount != 0;
+        const bool nativeTick = IsNativeTick();
+
+        if (directCloth && Config.targetFramerate > ReferenceFps && !nativeTick)
+        {
+            int32_t* simulationGate = reinterpret_cast<int32_t*>(owner + 0xC4);
+            const int32_t originalSimulationGate = *simulationGate;
+
+            *simulationGate = 1;
+            DirectResidentClothOwnerUpdate(owner);
+            *simulationGate = originalSimulationGate;
+            PublishDirectResidentClothBones(owner, cloth);
+            PublishDirectResidentClothTransform(cloth);
+        }
+        else
+        {
+            DirectResidentClothOwnerUpdate(owner);
+        }
+    }
+
     void __fastcall DirectResidentClothUpdateHook(uint8_t* cloth, uint8_t* context)
     {
         const uint16_t pointCount = cloth ? *reinterpret_cast<uint16_t*>(cloth) : 0;
-        const bool fixedRate = pointCount == DirectJacketPointCount &&
-                               Config.targetFramerate > ReferenceFps && FrameTickDelta60;
+        const bool fixedRate = pointCount != 0 && Config.targetFramerate > ReferenceFps && FrameTickDelta60;
         const bool nativeTick = IsNativeTick();
 
         if (!fixedRate)
         {
             DirectResidentClothUpdate(cloth, context);
-            return;
         }
-
-        if (!nativeTick)
+        else if (!nativeTick)
         {
             PublishDirectResidentClothTransform(cloth);
-            return;
         }
-
-        if (!context)
+        else if (!context)
         {
             DirectResidentClothUpdate(cloth, context);
-            return;
         }
-
-        float* deltaTime = reinterpret_cast<float*>(context + ClothContextDeltaOffset);
-        float* reciprocalDelta = reinterpret_cast<float*>(context + ClothContextReciprocalDeltaOffset);
-        const float originalDelta = *deltaTime;
-        const float originalReciprocalDelta = *reciprocalDelta;
-        *deltaTime = ClothReferenceStep;
-        *reciprocalDelta = 1.0f / ClothReferenceStep;
-        DirectResidentClothUpdate(cloth, context);
-        *deltaTime = originalDelta;
-        *reciprocalDelta = originalReciprocalDelta;
+        else
+        {
+            float* deltaTime = reinterpret_cast<float*>(context + 0x30);
+            float* reciprocalDelta = reinterpret_cast<float*>(context + 0x34);
+            const float originalDelta = *deltaTime;
+            const float originalReciprocalDelta = *reciprocalDelta;
+            *deltaTime = NativeSimulationStepSeconds;
+            *reciprocalDelta = 1.0f / NativeSimulationStepSeconds;
+            DirectResidentClothUpdate(cloth, context);
+            *deltaTime = originalDelta;
+            *reciprocalDelta = originalReciprocalDelta;
+        }
     }
 
     void __fastcall HairSimulationUpdateHook(uint8_t* hair)
     {
         const uint32_t chainCount = hair ? *reinterpret_cast<uint32_t*>(hair + 0x260) : 0;
-        const bool previousTiming = ActiveHairTiming;
-        ActiveHairTiming = chainCount == BandanaHairChainCount && Config.targetFramerate > ReferenceFps;
+        const bool previousBandanaTiming = ActiveBandanaTiming;
+        ActiveBandanaTiming = chainCount == 17 && Config.targetFramerate > ReferenceFps;
         HairSimulationUpdate(hair);
-        ActiveHairTiming = previousTiming;
+        ActiveBandanaTiming = previousBandanaTiming;
     }
 
     PhysicsWorldTimeState* GetPhysicsWorldTimeState(uint8_t* world, float fixedStep)
@@ -458,7 +533,7 @@ namespace
             return;
         }
 
-        const float fixedStep = *reinterpret_cast<float*>(world + PhysicsFixedStepOffset);
+        const float fixedStep = *reinterpret_cast<float*>(world + 0x670);
         if (!(fixedStep > 0.0f) || fixedStep >= 1.0f || !std::isfinite(fixedStep))
         {
             PhysicsWorldTimeStep(world, deltaTime);
@@ -483,7 +558,7 @@ namespace
         if (!ragdoll)
             return;
 
-        for (size_t index = 0; index < NpcRagdollBodyCount; ++index)
+        for (size_t index = 0; index < 13; ++index)
         {
             uint8_t* body = *reinterpret_cast<uint8_t**>(ragdoll + 8 + index * sizeof(uintptr_t));
             if (!body)
@@ -506,7 +581,7 @@ namespace
 
         if (ActiveNpcRagdollContactUpdate && velocityScale > 0.0f && velocityScale < 1.0f && std::isfinite(velocityScale))
         {
-            uint8_t* ragdoll = controller ? *reinterpret_cast<uint8_t**>(controller + NpcRagdollPointerOffset) : nullptr;
+            uint8_t* ragdoll = controller ? *reinterpret_cast<uint8_t**>(controller + 0x30) : nullptr;
             ScaleNpcRagdollVelocity(ragdoll, velocityScale);
         }
     }
@@ -568,7 +643,7 @@ namespace
             return false;
         LogAddress("frameTimeUpdate", reinterpret_cast<uintptr_t>(frameTimeUpdate));
 
-        FrameTickDelta300 = reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(FrameDeltaSeconds) + CharacterTickOffsetFromDelta);
+        FrameTickDelta300 = reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(FrameDeltaSeconds) + 0xC);
         LogAddress("frameTickDelta300", reinterpret_cast<uintptr_t>(FrameTickDelta300));
 
         if (MH_CreateHook(frameTimeUpdate, reinterpret_cast<LPVOID>(&FrameTimeUpdateHook), reinterpret_cast<void**>(&FrameTimeUpdate)) != MH_OK)
@@ -586,14 +661,8 @@ namespace
         constexpr std::array<uint8_t, 3> OutputQueueLoadOpcode = {0x48, 0x8D, 0x1D};
         constexpr std::array<uint8_t, 2> RawTickLoadOpcode = {0xF7, 0x2D};
         constexpr std::array<uint8_t, 4> ScaledTickLoadOpcode = {0x66, 0x0F, 0x6E, 0x05};
-        constexpr ptrdiff_t DisplacementOffset = 3;
-        constexpr ptrdiff_t InstructionSize = 7;
         constexpr ptrdiff_t RawTickLoadOffset = 0x56;
-        constexpr ptrdiff_t RawTickDisplacementOffset = RawTickLoadOffset + 2;
-        constexpr ptrdiff_t RawTickInstructionSize = 6;
         constexpr ptrdiff_t ScaledTickLoadOffset = 0x64;
-        constexpr ptrdiff_t ScaledTickDisplacementOffset = ScaledTickLoadOffset + 4;
-        constexpr ptrdiff_t ScaledTickInstructionSize = 8;
 
         uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, UpdatePattern);
         uint8_t* sequenceUpdate = Memory::PatternScanRange(GameText.begin, GameText.size, SequenceUpdatePattern);
@@ -615,10 +684,10 @@ namespace
 
         int32_t rawTickDisplacement = 0;
         int32_t scaledTickDisplacement = 0;
-        std::memcpy(&rawTickDisplacement, sequenceUpdate + RawTickDisplacementOffset, sizeof(rawTickDisplacement));
-        std::memcpy(&scaledTickDisplacement, sequenceUpdate + ScaledTickDisplacementOffset, sizeof(scaledTickDisplacement));
-        GamepadVibrationRawTickDelta300 = reinterpret_cast<int32_t*>(sequenceUpdate + RawTickLoadOffset + RawTickInstructionSize + rawTickDisplacement);
-        int32_t* sequenceScaledTickDelta300 = reinterpret_cast<int32_t*>(sequenceUpdate + ScaledTickLoadOffset + ScaledTickInstructionSize + scaledTickDisplacement);
+        std::memcpy(&rawTickDisplacement, sequenceUpdate + 0x58, sizeof(rawTickDisplacement));
+        std::memcpy(&scaledTickDisplacement, sequenceUpdate + 0x68, sizeof(scaledTickDisplacement));
+        GamepadVibrationRawTickDelta300 = reinterpret_cast<int32_t*>(sequenceUpdate + RawTickLoadOffset + 6 + rawTickDisplacement);
+        int32_t* sequenceScaledTickDelta300 = reinterpret_cast<int32_t*>(sequenceUpdate + ScaledTickLoadOffset + 8 + scaledTickDisplacement);
         LogAddress("gamepadVibrationRawTickDelta300", reinterpret_cast<uintptr_t>(GamepadVibrationRawTickDelta300));
         if (sequenceScaledTickDelta300 != FrameTickDelta300)
         {
@@ -626,7 +695,7 @@ namespace
             return false;
         }
 
-        uint8_t* outputQueueLoad = update + GamepadVibrationOutputLoadOffset;
+        uint8_t* outputQueueLoad = update + 0x64F;
         if (std::memcmp(outputQueueLoad, OutputQueueLoadOpcode.data(), OutputQueueLoadOpcode.size()) != 0)
         {
             spdlog::error("Gamepad vibration output-queue load validation failed");
@@ -634,8 +703,8 @@ namespace
         }
 
         int32_t outputDisplacement = 0;
-        std::memcpy(&outputDisplacement, outputQueueLoad + DisplacementOffset, sizeof(outputDisplacement));
-        GamepadVibrationOutputSamples = outputQueueLoad + InstructionSize + outputDisplacement;
+        std::memcpy(&outputDisplacement, outputQueueLoad + 3, sizeof(outputDisplacement));
+        GamepadVibrationOutputSamples = outputQueueLoad + 7 + outputDisplacement;
         LogAddress("gamepadVibrationOutputSamples", reinterpret_cast<uintptr_t>(GamepadVibrationOutputSamples));
 
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&GamepadUpdateHook), reinterpret_cast<void**>(&GamepadUpdate)) != MH_OK)
@@ -655,8 +724,6 @@ namespace
     {
         constexpr char Pattern[] = "48 89 5C 24 10 56 48 83 EC 30 48 8B D9 48 89 7C 24 40 8B 89 A8 00 00 00 33 F6 85 C9 0F 84 ?? ?? ?? ?? 83 E9 01 0F 84 ?? ?? ?? ?? 83 E9 01 74 ?? 83 F9 01 0F 85 ?? ?? ?? ?? F3 0F 10 05 ?? ?? ?? ??";
         constexpr ptrdiff_t DeltaLoadOffset = 0x39;
-        constexpr ptrdiff_t DeltaDisplacementOffset = DeltaLoadOffset + 4;
-        constexpr ptrdiff_t DeltaInstructionSize = 8;
         constexpr std::array<uint8_t, 4> DeltaLoadOpcode = {0xF3, 0x0F, 0x10, 0x05};
 
         uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
@@ -670,8 +737,8 @@ namespace
         }
 
         int32_t displacement = 0;
-        std::memcpy(&displacement, update + DeltaDisplacementOffset, sizeof(displacement));
-        FrameDeltaSeconds = reinterpret_cast<float*>(update + DeltaLoadOffset + DeltaInstructionSize + displacement);
+        std::memcpy(&displacement, update + 0x3D, sizeof(displacement));
+        FrameDeltaSeconds = reinterpret_cast<float*>(update + DeltaLoadOffset + 8 + displacement);
         LogAddress("frameDeltaSeconds", reinterpret_cast<uintptr_t>(FrameDeltaSeconds));
 
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&SphericalCameraUpdateHook), reinterpret_cast<void**>(&SphericalCameraUpdate)) != MH_OK)
@@ -687,23 +754,20 @@ namespace
     bool InstallPolygonDemoTimingFix()
     {
         constexpr char Pattern[] = "48 89 5C 24 20 56 57 41 54 41 56 41 57 48 83 EC 40 48 8B 1D ?? ?? ?? ?? 4C 8D B1 90 00 00 00 33 F6 4C 8D 3D ?? ?? ?? ?? 48 8B F9 8B 89 C4 45 04 00 44 8D 66 01 8D 56 02 85 C9 7E ?? 3B 8F C0 45 04 00";
-        constexpr ptrdiff_t TimeDeltaLoadOffset = 0x21;
-        constexpr ptrdiff_t TimeDeltaDisplacementOffset = TimeDeltaLoadOffset + 3;
-        constexpr ptrdiff_t TickDelta60Offset = 8;
         constexpr std::array<uint8_t, 3> TimeDeltaLoadOpcode = {0x4C, 0x8D, 0x3D};
 
         uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
         if (!update)
             return false;
         LogAddress("polygonDemoUpdate", reinterpret_cast<uintptr_t>(update));
-        if (std::memcmp(update + TimeDeltaLoadOffset, TimeDeltaLoadOpcode.data(), TimeDeltaLoadOpcode.size()) != 0)
+        if (std::memcmp(update + 0x21, TimeDeltaLoadOpcode.data(), TimeDeltaLoadOpcode.size()) != 0)
         {
             spdlog::error("Polygon-demo time-delta load validation failed");
             return false;
         }
 
-        uint8_t* timeDelta = reinterpret_cast<uint8_t*>(GetRelativeOffset(update + TimeDeltaDisplacementOffset));
-        FrameTickDelta60 = reinterpret_cast<int32_t*>(timeDelta + TickDelta60Offset);
+        uint8_t* timeDelta = reinterpret_cast<uint8_t*>(GetRelativeOffset(update + 0x24));
+        FrameTickDelta60 = reinterpret_cast<int32_t*>(timeDelta + 8);
         LogAddress("frameTickDelta60", reinterpret_cast<uintptr_t>(FrameTickDelta60));
 
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&PolygonDemoUpdateHook), reinterpret_cast<void**>(&PolygonDemoUpdate)) != MH_OK)
@@ -742,7 +806,7 @@ namespace
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&SpursTaskTimingHook), reinterpret_cast<void**>(&SpursTaskTiming)) != MH_OK)
             return false;
 
-        spdlog::info("SPURS simulation tasks now use corrected timing");
+        spdlog::info("SPURS task-step timing hook installed");
         return true;
     }
 
@@ -780,23 +844,38 @@ namespace
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&ClothProducerUpdateHook), reinterpret_cast<void**>(&ClothProducerUpdate)) != MH_OK)
             return false;
 
-        spdlog::info("Seven- and ten-point standalone strip-cloth use the per-render delta; other producers advance at 60 Hz");
+        spdlog::info("Installed strip-cloth producer timing fix");
         return true;
     }
 
     bool InstallDirectResidentClothTimingFix()
     {
+        constexpr char OwnerPattern[] = "48 89 5C 24 08 57 48 81 EC B0 00 00 00 48 8B D9 0F 29 B4 24 A0 00 00 00 48 8B 89 A8 00 00 00 48 85 C9 74 ?? E8 ?? ?? ?? ?? 4C 8B 83 A0 00 00 00";
+        constexpr char BonePublishPattern[] = "4C 8B DC 55 57 41 55 41 57 49 8D AB ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 ?? ?? 4C 8B F9 4C 8B 89 ?? ?? ?? ?? 4C 8B A9 ?? ?? ?? ?? 48 8B B9 ?? ?? ?? ?? 48 89 85 ?? ?? ?? ?? 0F B7 81";
         constexpr char Pattern[] = "48 8B C4 55 53 48 8D A8 78 FE FF FF 48 81 EC 78 02 00 00 4C 8B 89 58 04 00 00 48 8B D9 44 0F B7 42 3C 48 89 78 18 48 8B FA 4C 89 68 E8";
+
+        uint8_t* ownerUpdate = Memory::PatternScanRange(GameText.begin, GameText.size, OwnerPattern);
+        if (!ownerUpdate)
+            return false;
+        LogAddress("directResidentClothOwnerUpdate", reinterpret_cast<uintptr_t>(ownerUpdate));
+
+        uint8_t* bonePublish = Memory::PatternScanRange(GameText.begin, GameText.size, BonePublishPattern);
+        if (!bonePublish)
+            return false;
+        LogAddress("directResidentClothBonePublish", reinterpret_cast<uintptr_t>(bonePublish));
+        DirectResidentClothBonePublish = reinterpret_cast<DirectResidentClothBonePublishDelegate>(bonePublish);
 
         uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
         if (!update)
             return false;
         LogAddress("directResidentClothUpdate", reinterpret_cast<uintptr_t>(update));
 
+        if (MH_CreateHook(ownerUpdate, reinterpret_cast<LPVOID>(&DirectResidentClothOwnerUpdateHook), reinterpret_cast<void**>(&DirectResidentClothOwnerUpdate)) != MH_OK)
+            return false;
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&DirectResidentClothUpdateHook), reinterpret_cast<void**>(&DirectResidentClothUpdate)) != MH_OK)
             return false;
 
-        spdlog::info("58-point direct-jacket simulation advances at 60 Hz while transforms publish per-render");
+        spdlog::info("Cloth simulation patched");
         return true;
     }
 
@@ -811,7 +890,7 @@ namespace
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&HairSimulationUpdateHook), reinterpret_cast<void**>(&HairSimulationUpdate)) != MH_OK)
             return false;
 
-        spdlog::info("Bandana and 17-node hair timing uses the proven 0.1.0 per-render update policy");
+        spdlog::info("Bandana physics patched");
         return true;
     }
 
