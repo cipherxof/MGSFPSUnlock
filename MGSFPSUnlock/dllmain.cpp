@@ -9,6 +9,9 @@
 #include "MGS3/mgs3.h"
 #include "MGS4/mgs4.h"
 
+#include <array>
+#include <mutex>
+
 #define LOG_FORMAT_PREFIX "[%Y-%m-%d %H:%M:%S.%e] [MGSFPSUnlock] [%l]"
 
 std::shared_ptr<spdlog::logger> logger;
@@ -95,7 +98,7 @@ void InitializeLogger()
     }
 }
 
-DWORD WINAPI MainThread(LPVOID lpParam)
+void InitializePlugin()
 {
     InitializeLogger();
 
@@ -104,7 +107,7 @@ DWORD WINAPI MainThread(LPVOID lpParam)
     if (Config.gameVersion == 0)
     {
         spdlog::error("Unable to get game version, closing!");
-        return false;
+        return;
     }
 
     ReadConfig(); //Read the config after checking gameVersion, otherwise any regeneration logs will be cleared when the launcher closes.
@@ -136,25 +139,18 @@ DWORD WINAPI MainThread(LPVOID lpParam)
         spdlog::error("Unknown game!");
         break;
     }
-
-    return true;
 }
 
-BOOL APIENTRY DllMain( HMODULE hModule,
-                       DWORD  ul_reason_for_call,
-                       LPVOID lpReserved
-                     )
+extern "C" __declspec(dllexport) void InitializeASI()
 {
-    switch (ul_reason_for_call)
-    {
-    case DLL_PROCESS_ATTACH:
+    static std::once_flag flag;
+    std::call_once(flag, InitializePlugin);
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
+{
+    if (reason == DLL_PROCESS_ATTACH)
         DisableThreadLibraryCalls(hModule);
-        CreateThread(NULL, NULL, MainThread, NULL, NULL, NULL);
-        break;
-    case DLL_THREAD_ATTACH:
-    case DLL_THREAD_DETACH:
-    case DLL_PROCESS_DETACH:
-        break;
-    }
+
     return TRUE;
 }

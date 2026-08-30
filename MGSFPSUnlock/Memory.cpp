@@ -43,6 +43,41 @@ void Memory::DetourFunction(uint64_t target, LPVOID detour, LPVOID* ppOriginal)
     MH_EnableHook((LPVOID)target);
 }
 
+bool Memory::GetModuleSection(HMODULE module, const char* name, ModuleSection& result)
+{
+    result = {};
+    if (!module || !name)
+        return false;
+
+    const size_t nameLength = strlen(name);
+    if (nameLength == 0 || nameLength > IMAGE_SIZEOF_SHORT_NAME)
+        return false;
+
+    const auto dosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(module);
+    if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+        return false;
+
+    const auto ntHeaders = reinterpret_cast<PIMAGE_NT_HEADERS>(
+        reinterpret_cast<uint8_t*>(module) + dosHeader->e_lfanew);
+    if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
+        return false;
+
+    const auto expectedName = reinterpret_cast<const uint8_t*>(name);
+    auto section = IMAGE_FIRST_SECTION(ntHeaders);
+    for (WORD index = 0; index < ntHeaders->FileHeader.NumberOfSections; ++index, ++section)
+    {
+        if (memcmp(section->Name, expectedName, nameLength) != 0 ||
+            (nameLength < IMAGE_SIZEOF_SHORT_NAME && section->Name[nameLength] != '\0'))
+            continue;
+
+        result.begin = reinterpret_cast<uint8_t*>(module) + section->VirtualAddress;
+        result.size = static_cast<uintptr_t>(section->Misc.VirtualSize);
+        return result.size != 0;
+    }
+
+    return false;
+}
+
 uintptr_t Memory::PatternScanBasic(uintptr_t beg, uintptr_t end, uint8_t* str, uintptr_t len)
 {
     for (uintptr_t ptr = beg; ptr < end - len; ++ptr)

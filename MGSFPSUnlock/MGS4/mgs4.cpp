@@ -10,7 +10,6 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
-#include <limits>
 #include <mutex>
 
 namespace
@@ -77,13 +76,8 @@ namespace
     thread_local bool ActiveClothManagerTiming = false;
     thread_local bool ActiveClothProducerTiming = false;
     thread_local bool ActiveBandanaTiming = false;
+    thread_local bool ActiveManagerStripPerRenderTiming = false;
     thread_local bool ActiveNpcRagdollContactUpdate = false;
-
-    struct ExecutableSection
-    {
-        uint8_t* begin = nullptr;
-        uintptr_t size = 0;
-    };
 
     struct PhysicsWorldTimeState
     {
@@ -92,37 +86,19 @@ namespace
         double accumulator = 0.0;
     };
 
-    ExecutableSection GameText{};
+    struct ClothObjectListView
+    {
+        uint8_t* first = nullptr;
+        uint32_t count = 0;
+    };
+
+    Memory::ModuleSection GameText{};
     std::array<PhysicsWorldTimeState, PhysicsWorldTimeStateCount> PhysicsWorldTimeStates{};
     std::array<uint8_t, GamepadVibrationQueueBytes> ActiveGamepadVibrationSamples{};
     std::array<uint8_t, GamepadVibrationQueueBytes> PendingGamepadVibrationSamples{};
     std::atomic<uint64_t> RenderFrameSerial{0};
     std::atomic<uint64_t> PolygonDemoFrameSerial{0};
     std::mutex GamepadVibrationMutex;
-
-    bool FindTextSection()
-    {
-        const auto dosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(GameModule);
-        if (!dosHeader || dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
-            return false;
-
-        const auto ntHeaders = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<uint8_t*>(GameModule) + dosHeader->e_lfanew);
-        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
-            return false;
-
-        auto section = IMAGE_FIRST_SECTION(ntHeaders);
-        for (WORD index = 0; index < ntHeaders->FileHeader.NumberOfSections; ++index, ++section)
-        {
-            if (std::memcmp(section->Name, ".text", 5) != 0)
-                continue;
-
-            GameText.begin = reinterpret_cast<uint8_t*>(GameModule) + section->VirtualAddress;
-            GameText.size = static_cast<uintptr_t>(section->Misc.VirtualSize);
-            return true;
-        }
-
-        return false;
-    }
 
     bool IsNativeTick()
     {
@@ -136,59 +112,26 @@ namespace
         return polygonDemoFrame != 0 && currentFrame >= polygonDemoFrame && currentFrame - polygonDemoFrame <= 1;
     }
 
-    bool IsReadableRange(const void* address, size_t size)
+    ClothObjectListView GetClothObjectList(const uint8_t* owner, ptrdiff_t listOffset)
     {
-        if (!address || size == 0)
-            return false;
-
-        const uintptr_t begin = reinterpret_cast<uintptr_t>(address);
-        if (size > std::numeric_limits<uintptr_t>::max() - begin)
-            return false;
-
-        const uintptr_t end = begin + size;
-        uintptr_t cursor = begin;
-        while (cursor < end)
-        {
-            MEMORY_BASIC_INFORMATION memory{};
-            if (VirtualQuery(reinterpret_cast<const void*>(cursor), &memory, sizeof(memory)) != sizeof(memory) ||
-                memory.State != MEM_COMMIT || (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
-                return false;
-
-            const uintptr_t regionBegin = reinterpret_cast<uintptr_t>(memory.BaseAddress);
-            if (memory.RegionSize > std::numeric_limits<uintptr_t>::max() - regionBegin)
-                return false;
-
-            const uintptr_t regionEnd = regionBegin + memory.RegionSize;
-            if (cursor < regionBegin || regionEnd <= cursor)
-                return false;
-
-            cursor = std::min(end, regionEnd);
-        }
-
-        return true;
-    }
-
-    uint8_t* GetFirstClothObject(const uint8_t* owner, ptrdiff_t listOffset)
-    {
-        if (!owner || !IsReadableRange(owner + listOffset, sizeof(uint8_t*)))
-            return nullptr;
+        if (!owner)
+            return {};
 
         const uint8_t* list = *reinterpret_cast<uint8_t* const*>(owner + listOffset);
-        if (!list || !IsReadableRange(list, 0x10 + sizeof(uint8_t**)))
-            return nullptr;
+        if (!list)
+            return {};
 
         const int32_t count = *reinterpret_cast<const int32_t*>(list);
         if (count <= 0 || count > 4096)
-            return nullptr;
+            return {};
 
         uint8_t* const* objects = *reinterpret_cast<uint8_t* const* const*>(list + 0x10);
-        return objects && IsReadableRange(objects, sizeof(uint8_t*)) ? objects[0] : nullptr;
+        return {objects ? objects[0] : nullptr, static_cast<uint32_t>(count)};
     }
 
     uint16_t GetStripSolverPointCount(const uint8_t* solver)
     {
-        const uint8_t* count = solver ? solver + 0x110 : nullptr;
-        return IsReadableRange(count, sizeof(uint16_t)) ? *reinterpret_cast<const uint16_t*>(count) : 0;
+        return solver ? *reinterpret_cast<const uint16_t*>(solver + 0x110) : 0;
     }
 
     int __fastcall GetTargetFpsHook()
@@ -353,7 +296,8 @@ namespace
         }
         else
         {
-            const bool useExactDelta = !ActiveClothManagerTiming && !ActiveClothProducerTiming && validExactDelta &&
+            const bool useExactDelta = (!ActiveClothManagerTiming || ActiveManagerStripPerRenderTiming) &&
+                                       !ActiveClothProducerTiming && validExactDelta &&
                                        stockStep > exactDelta && stockStep <= MaximumReasonableTaskStep && std::isfinite(stockStep);
             if (useExactDelta)
             {
@@ -376,18 +320,22 @@ namespace
     void __fastcall ClothProducerUpdateHook(uint8_t* producer, float updateArgument, int32_t updateType)
     {
         const bool nativeTick = IsNativeTick();
-        const uint8_t* firstObject = GetFirstClothObject(producer, 0x08);
-        const uint32_t pointCount = GetStripSolverPointCount(firstObject);
+        const ClothObjectListView objects = GetClothObjectList(producer, 0x08);
+        const uint32_t pointCount = GetStripSolverPointCount(objects.first);
         const bool managerBacked = ActiveClothManagerTiming;
         const bool cutsceneSevenPoint = pointCount == 7 && IsPolygonDemoActive();
-        const bool usePerRenderDelta = !managerBacked && (pointCount == 10 || (pointCount == 7 && !cutsceneSevenPoint));
+        const bool managerBackedHair = managerBacked && objects.count == 1 && pointCount == 11;
+        const bool usePerRenderDelta = managerBackedHair || (!managerBacked && (pointCount == 10 || (pointCount == 7 && !cutsceneSevenPoint)));
         const bool simulated = usePerRenderDelta || nativeTick;
 
         if (simulated)
         {
             const bool previousTiming = ActiveClothProducerTiming;
+            const bool previousManagerPerRenderTiming = ActiveManagerStripPerRenderTiming;
             ActiveClothProducerTiming = !usePerRenderDelta;
+            ActiveManagerStripPerRenderTiming = managerBackedHair;
             ClothProducerUpdate(producer, updateArgument, updateType);
+            ActiveManagerStripPerRenderTiming = previousManagerPerRenderTiming;
             ActiveClothProducerTiming = previousTiming;
         }
         else if (producer && ClothTransformPublish)
@@ -408,14 +356,13 @@ namespace
 
     void PublishDirectResidentClothBones(uint8_t* owner, uint8_t* cloth)
     {
-        if (!owner || !cloth || !DirectResidentClothBonePublish ||
-            !IsReadableRange(owner + 0xC0, sizeof(uint32_t)))
+        if (!owner || !cloth || !DirectResidentClothBonePublish)
             return;
 
         const uint32_t pingPong = *reinterpret_cast<uint32_t*>(owner + 0xC0) & 1;
         uint8_t** particleBufferSlot = reinterpret_cast<uint8_t**>(
             cloth + 0x08 + pingPong * sizeof(uint8_t*));
-        if (!IsReadableRange(particleBufferSlot, sizeof(uint8_t*)) || !*particleBufferSlot)
+        if (!*particleBufferSlot)
             return;
 
         uint8_t* particleBuffer = *particleBufferSlot;
@@ -424,12 +371,8 @@ namespace
 
     void __fastcall DirectResidentClothOwnerUpdateHook(uint8_t* owner)
     {
-        uint8_t* cloth = owner && IsReadableRange(owner + 0x90, sizeof(uint8_t*))
-            ? *reinterpret_cast<uint8_t**>(owner + 0x90)
-            : nullptr;
-        const uint16_t pointCount = cloth && IsReadableRange(cloth, sizeof(uint16_t))
-            ? *reinterpret_cast<uint16_t*>(cloth)
-            : 0;
+        uint8_t* cloth = owner ? *reinterpret_cast<uint8_t**>(owner + 0x90) : nullptr;
+        const uint16_t pointCount = cloth ? *reinterpret_cast<uint16_t*>(cloth) : 0;
         const bool directCloth = pointCount != 0;
         const bool nativeTick = IsNativeTick();
 
@@ -610,22 +553,10 @@ namespace
     {
         constexpr char TargetFpsPattern[] = "40 55 48 8B EC 48 83 EC 50 8B 05 ?? ?? ?? ?? 83 F8 FF 0F 85 ?? ?? ?? ?? E8 ?? ?? ?? ?? 3D 80 00 00 00";
 
-        if (!FindTextSection())
+        if (!Memory::GetModuleSection(GameModule, ".text", GameText))
             return nullptr;
 
-        // The ASI can load before the packed executable has restored .text.
-        for (int attempt = 0; attempt < 60; ++attempt)
-        {
-            uint8_t* address = Memory::PatternScanRange(GameText.begin, GameText.size, TargetFpsPattern);
-            if (address)
-                return address;
-
-            if (attempt == 0)
-                spdlog::info("Waiting for mgs4.exe to unpack its code");
-            Sleep(250);
-        }
-
-        return nullptr;
+        return Memory::PatternScanRange(GameText.begin, GameText.size, TargetFpsPattern);
     }
 
     bool InstallCharacterControlTimingFix()
