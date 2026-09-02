@@ -21,6 +21,7 @@ namespace
     using GamepadVibrationMergeDelegate = void(__fastcall*)(uint32_t gamepadIndex, const uint8_t* samples, int32_t sampleCount);
     using SphericalCameraUpdateDelegate = void(__fastcall*)(uint8_t* camera);
     using PolygonDemoUpdateDelegate = void(__fastcall*)(uint8_t* demo);
+    using MicrowaveMashControlUpdateDelegate = uint64_t(__fastcall*)(uint8_t* controller);
     using ActorMessagePollDelegate = int32_t(__fastcall*)(uint32_t key, uint8_t** messages);
     using WindManagerUpdateDelegate = void(__fastcall*)(uint8_t* windManager);
     using SpursTaskTimingDelegate = uint64_t(__fastcall*)(float* taskStep, uint32_t maxSteps);
@@ -43,6 +44,7 @@ namespace
     GamepadVibrationMergeDelegate GamepadVibrationMerge = nullptr;
     SphericalCameraUpdateDelegate SphericalCameraUpdate = nullptr;
     PolygonDemoUpdateDelegate PolygonDemoUpdate = nullptr;
+    MicrowaveMashControlUpdateDelegate MicrowaveMashControlUpdate = nullptr;
     ActorMessagePollDelegate ActorMessagePoll = nullptr;
     WindManagerUpdateDelegate WindManagerUpdate = nullptr;
     SpursTaskTimingDelegate SpursTaskTiming = nullptr;
@@ -76,6 +78,8 @@ namespace
     constexpr size_t PhysicsWorldTimeStateCount = 8;
     constexpr size_t PolygonDemoControlMessageCapacity = 16;
     constexpr size_t ActorMessageRecordSize = 0x18;
+    constexpr ptrdiff_t MicrowaveInputModeOffset = 0x1E4;
+    constexpr int32_t MashInputMode = 1;
 
     thread_local bool ActiveClothManagerTiming = false;
     thread_local bool ActiveClothProducerTiming = false;
@@ -421,6 +425,16 @@ namespace
     {
         if (IsNativeTick())
             WindManagerUpdate(windManager);
+    }
+
+    uint64_t __fastcall MicrowaveMashControlUpdateHook(uint8_t* controller)
+    {
+        const bool mashInputActive = controller &&
+            *reinterpret_cast<const int32_t*>(controller + MicrowaveInputModeOffset) == MashInputMode;
+        if (mashInputActive && !IsNativeTick())
+            return 0;
+
+        return MicrowaveMashControlUpdate(controller);
     }
 
     uint64_t __fastcall SpursTaskTimingHook(float* taskStep, uint32_t maxSteps)
@@ -881,6 +895,21 @@ namespace
         return true;
     }
 
+    bool InstallMicrowaveMashTimingFix()
+    {
+        constexpr char Pattern[] = "48 89 5C 24 10 48 89 6C 24 18 56 57 41 54 41 56 41 57 48 83 EC 40 48 8B 69 38 48 8B D9 8B 89 E4 01 00 00 45 33 FF 41 BC FF 00 00 00";
+        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        if (!update)
+            return false;
+        LogAddress("microwaveMashControlUpdate", reinterpret_cast<uintptr_t>(update));
+
+        if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&MicrowaveMashControlUpdateHook), reinterpret_cast<void**>(&MicrowaveMashControlUpdate)) != MH_OK)
+            return false;
+
+        spdlog::info("Microwave mash-input timing fix applied");
+        return true;
+    }
+
     bool InstallSpursTaskTimingFix()
     {
         constexpr char Pattern[] = "48 89 5C 24 08 57 48 83 EC 40 8B 05 ?? ?? ?? ?? 48 8B D9 0B 05 ?? ?? ?? ?? 0F 29 74 24 30 0F 29 7C 24 20 8B FA A9 00 00 00 06";
@@ -1067,6 +1096,8 @@ void MGS4_Initialize()
         spdlog::error("Failed to install the gamepad vibration timing fix");
     if (!InstallPolygonDemoTimingFix())
         spdlog::error("Failed to install the polygon-demo timing fix");
+    if (!InstallMicrowaveMashTimingFix())
+        spdlog::error("Failed to install the microwave mash-input timing fix");
     if (!InstallWindManagerTimingFix())
         spdlog::error("Failed to install the wind-manager timing fix");
     if (!InstallSpursTaskTimingFix())
