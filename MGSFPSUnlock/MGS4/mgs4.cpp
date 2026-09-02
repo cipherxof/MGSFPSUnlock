@@ -21,6 +21,7 @@ namespace
     using GamepadVibrationMergeDelegate = void(__fastcall*)(uint32_t gamepadIndex, const uint8_t* samples, int32_t sampleCount);
     using SphericalCameraUpdateDelegate = void(__fastcall*)(uint8_t* camera);
     using PolygonDemoUpdateDelegate = void(__fastcall*)(uint8_t* demo);
+    using ActorMessagePollDelegate = int32_t(__fastcall*)(uint32_t key, uint8_t** messages);
     using WindManagerUpdateDelegate = void(__fastcall*)(uint8_t* windManager);
     using SpursTaskTimingDelegate = uint64_t(__fastcall*)(float* taskStep, uint32_t maxSteps);
     using ClothManagerUpdateDelegate = void(__fastcall*)(uint8_t* manager, float updateArgument, int32_t updateType);
@@ -42,6 +43,7 @@ namespace
     GamepadVibrationMergeDelegate GamepadVibrationMerge = nullptr;
     SphericalCameraUpdateDelegate SphericalCameraUpdate = nullptr;
     PolygonDemoUpdateDelegate PolygonDemoUpdate = nullptr;
+    ActorMessagePollDelegate ActorMessagePoll = nullptr;
     WindManagerUpdateDelegate WindManagerUpdate = nullptr;
     SpursTaskTimingDelegate SpursTaskTiming = nullptr;
     ClothManagerUpdateDelegate ClothManagerUpdate = nullptr;
@@ -72,6 +74,8 @@ namespace
     constexpr size_t GamepadVibrationQueueBytes = GamepadCount * GamepadVibrationQueueSize;
     constexpr size_t GamepadMotorCount = 2;
     constexpr size_t PhysicsWorldTimeStateCount = 8;
+    constexpr size_t PolygonDemoControlMessageCapacity = 16;
+    constexpr size_t ActorMessageRecordSize = 0x18;
 
     thread_local bool ActiveClothManagerTiming = false;
     thread_local bool ActiveClothProducerTiming = false;
@@ -92,6 +96,14 @@ namespace
         uint32_t count = 0;
     };
 
+    struct PolygonDemoControlMessageQueue
+    {
+        uintptr_t demo = 0;
+        uint32_t key = 0;
+        size_t count = 0;
+        std::array<int32_t, PolygonDemoControlMessageCapacity> codes{};
+    };
+
     Memory::ModuleSection GameText{};
     std::array<PhysicsWorldTimeState, PhysicsWorldTimeStateCount> PhysicsWorldTimeStates{};
     std::array<uint8_t, GamepadVibrationQueueBytes> ActiveGamepadVibrationSamples{};
@@ -99,6 +111,12 @@ namespace
     std::atomic<uint64_t> RenderFrameSerial{0};
     std::atomic<uint64_t> PolygonDemoFrameSerial{0};
     std::mutex GamepadVibrationMutex;
+    thread_local uint8_t* ActivePolygonDemoUpdate = nullptr;
+    thread_local bool DeferPolygonDemoControlMessages = false;
+    thread_local PolygonDemoControlMessageQueue PendingPolygonDemoControlMessages;
+    alignas(8) thread_local std::array<uint8_t, PolygonDemoControlMessageCapacity * ActorMessageRecordSize>
+        DeferredPolygonDemoMessageRecords{};
+    thread_local std::array<int32_t, PolygonDemoControlMessageCapacity> DeferredPolygonDemoMessagePayloads{};
 
     bool IsNativeTick()
     {
@@ -265,12 +283,138 @@ namespace
         *turnSpeed = originalTurnSpeed;
     }
 
+    int32_t __fastcall ActorMessagePollHook(uint32_t key, uint8_t** messages)
+    {
+        int32_t result = ActorMessagePoll(key, messages);
+        uint8_t* const demo = ActivePolygonDemoUpdate;
+        if (!demo || !messages || key != *reinterpret_cast<const uint32_t*>(demo + 0x44530))
+            return result;
+
+        PolygonDemoControlMessageQueue& pending = PendingPolygonDemoControlMessages;
+        const uintptr_t demoAddress = reinterpret_cast<uintptr_t>(demo);
+        if (pending.count != 0 && (pending.demo != demoAddress || pending.key != key))
+            pending = {};
+
+        if (DeferPolygonDemoControlMessages)
+        {
+            if (result > 0 && *messages)
+            {
+                if (pending.count == 0)
+                {
+                    pending.demo = demoAddress;
+                    pending.key = key;
+                }
+
+                const size_t available = PolygonDemoControlMessageCapacity - pending.count;
+                const size_t captured = std::min(static_cast<size_t>(result), available);
+                for (size_t index = 0; index < captured; ++index)
+                {
+                    const uint8_t* const record = *messages + index * ActorMessageRecordSize;
+                    const int32_t* const payload = *reinterpret_cast<int32_t* const*>(record + 0x08);
+                    if (payload)
+                        pending.codes[pending.count++] = payload[0];
+                }
+            }
+
+            *messages = nullptr;
+            return 0;
+        }
+
+        if (pending.count == 0)
+            return result;
+
+        const size_t nativeCount = result > 0 ? static_cast<size_t>(result) : 0;
+        if ((nativeCount != 0 && !*messages) ||
+            nativeCount + pending.count > PolygonDemoControlMessageCapacity)
+        {
+            return result;
+        }
+
+        DeferredPolygonDemoMessageRecords.fill(0);
+        if (nativeCount != 0)
+        {
+            std::memcpy(
+                DeferredPolygonDemoMessageRecords.data(),
+                *messages,
+                nativeCount * ActorMessageRecordSize);
+        }
+
+        for (size_t index = 0; index < pending.count; ++index)
+        {
+            const size_t recordIndex = nativeCount + index;
+            uint8_t* const record =
+                DeferredPolygonDemoMessageRecords.data() + recordIndex * ActorMessageRecordSize;
+            DeferredPolygonDemoMessagePayloads[recordIndex] = pending.codes[index];
+            int32_t* const payload = &DeferredPolygonDemoMessagePayloads[recordIndex];
+            std::memcpy(record + 0x08, &payload, sizeof(payload));
+        }
+
+        result = static_cast<int32_t>(nativeCount + pending.count);
+        *messages = DeferredPolygonDemoMessageRecords.data();
+        pending = {};
+        return result;
+    }
+
+    void CapturePolygonDemoControlMessages(uint8_t* demo)
+    {
+        if (!demo || !ActorMessagePoll)
+            return;
+
+        const uint32_t key = *reinterpret_cast<const uint32_t*>(demo + 0x44530);
+        if (key == 0)
+            return;
+
+        uint8_t* messages = nullptr;
+        uint8_t* const previousDemo = ActivePolygonDemoUpdate;
+        const bool previousDefer = DeferPolygonDemoControlMessages;
+        ActivePolygonDemoUpdate = demo;
+        DeferPolygonDemoControlMessages = true;
+        ActorMessagePollHook(key, &messages);
+        DeferPolygonDemoControlMessages = previousDefer;
+        ActivePolygonDemoUpdate = previousDemo;
+    }
+
     void __fastcall PolygonDemoUpdateHook(uint8_t* demo)
     {
         PolygonDemoFrameSerial.store(RenderFrameSerial.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        const bool timelineReset = demo && *reinterpret_cast<int32_t*>(demo + 0x44588) != 0;
-        if (timelineReset || IsNativeTick())
-            PolygonDemoUpdate(demo);
+        if (!demo)
+        {
+            if (IsNativeTick())
+                PolygonDemoUpdate(demo);
+            return;
+        }
+
+        const bool timelineReset = *reinterpret_cast<int32_t*>(demo + 0x44588) != 0;
+        if (timelineReset)
+            PendingPolygonDemoControlMessages = {};
+
+        const bool nativeUpdate = timelineReset || IsNativeTick();
+        const bool pauseMaintenanceUpdate =
+            !nativeUpdate && *reinterpret_cast<int32_t*>(demo + 0x445A0) != 0;
+        if (!nativeUpdate && !pauseMaintenanceUpdate)
+        {
+            // Actor message buffers rotate every render frame. Preserve control messages that would otherwise expire before the next update.
+            CapturePolygonDemoControlMessages(demo);
+            return;
+        }
+
+        uint8_t* const previousDemo = ActivePolygonDemoUpdate;
+        const bool previousDefer = DeferPolygonDemoControlMessages;
+        int32_t savedCountdown = 0;
+        if (pauseMaintenanceUpdate)
+        {
+            savedCountdown = *reinterpret_cast<int32_t*>(demo + 0x445C4);
+            *reinterpret_cast<int32_t*>(demo + 0x445C4) = 0;
+            DeferPolygonDemoControlMessages = true;
+        }
+
+        ActivePolygonDemoUpdate = demo;
+        PolygonDemoUpdate(demo);
+        ActivePolygonDemoUpdate = previousDemo;
+        DeferPolygonDemoControlMessages = previousDefer;
+
+        if (pauseMaintenanceUpdate)
+            *reinterpret_cast<int32_t*>(demo + 0x445C4) = savedCountdown;
     }
 
     void __fastcall WindManagerUpdateHook(uint8_t* windManager)
@@ -685,12 +829,15 @@ namespace
     bool InstallPolygonDemoTimingFix()
     {
         constexpr char Pattern[] = "48 89 5C 24 20 56 57 41 54 41 56 41 57 48 83 EC 40 48 8B 1D ?? ?? ?? ?? 4C 8D B1 90 00 00 00 33 F6 4C 8D 3D ?? ?? ?? ?? 48 8B F9 8B 89 C4 45 04 00 44 8D 66 01 8D 56 02 85 C9 7E ?? 3B 8F C0 45 04 00";
+        constexpr char ActorMessagePollPattern[] = "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 54 41 55 41 56 41 57 48 83 EC 20 4C 8B E2 8B F1 E8 ?? ?? ?? ?? 85 C0";
         constexpr std::array<uint8_t, 3> TimeDeltaLoadOpcode = {0x4C, 0x8D, 0x3D};
 
         uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
-        if (!update)
+        uint8_t* actorMessagePoll = Memory::PatternScanRange(GameText.begin, GameText.size, ActorMessagePollPattern);
+        if (!update || !actorMessagePoll)
             return false;
         LogAddress("polygonDemoUpdate", reinterpret_cast<uintptr_t>(update));
+        LogAddress("actorMessagePoll", reinterpret_cast<uintptr_t>(actorMessagePoll));
         if (std::memcmp(update + 0x21, TimeDeltaLoadOpcode.data(), TimeDeltaLoadOpcode.size()) != 0)
         {
             spdlog::error("Polygon-demo time-delta load validation failed");
@@ -707,7 +854,15 @@ namespace
             return false;
         }
 
-        spdlog::info("Polygon demos and cutscene seven-point strip physics advance on native 60 Hz ticks");
+        if (MH_CreateHook(actorMessagePoll, reinterpret_cast<LPVOID>(&ActorMessagePollHook), reinterpret_cast<void**>(&ActorMessagePoll)) != MH_OK)
+        {
+            MH_RemoveHook(update);
+            PolygonDemoUpdate = nullptr;
+            FrameTickDelta60 = nullptr;
+            return false;
+        }
+
+        spdlog::info("Polygon-demo timing and control-message fixes applied");
         return true;
     }
 
