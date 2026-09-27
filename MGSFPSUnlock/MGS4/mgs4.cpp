@@ -861,6 +861,124 @@ namespace
         return true;
     }
 
+    bool LoadsFrameTicks300(const uint8_t* site, const uint8_t* timeGetter, uint8_t sourceRegister, bool extendedRegister, uint8_t tickOffset)
+    {
+        constexpr ptrdiff_t SearchWindow = 32;
+        const uint8_t load[] = {0x44, 0x8B, static_cast<uint8_t>(0x40 | (sourceRegister << 3)), tickOffset};
+        const uint8_t* loadBytes = extendedRegister ? load : load + 1;
+        const size_t loadSize = extendedRegister ? sizeof(load) : sizeof(load) - 1;
+
+        for (const uint8_t* call = site - SearchWindow; call + 5 <= site; ++call)
+        {
+            if (call[0] != 0xE8 || reinterpret_cast<const uint8_t*>(GetRelativeOffset(const_cast<uint8_t*>(call + 1))) != timeGetter)
+                continue;
+
+            for (const uint8_t* candidate = call + 5; candidate + loadSize <= site; ++candidate)
+            {
+                if (std::memcmp(candidate, loadBytes, loadSize) != 0)
+                    continue;
+                if (!extendedRegister && (candidate[-1] & 0xF0) == 0x40)
+                    continue;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool InstallActionTimerTimingFix()
+    {
+        constexpr char TimeGetterPattern[] = "48 83 EC 28 E8 ?? ?? ?? ?? 85 C0 48 8D 05 ?? ?? ?? ?? 75 07 48 8D 05 ?? ?? ?? ?? 48 83 C4 28 C3";
+        constexpr uint8_t DivideByFiveMagic[] = {0xB8, 0x67, 0x66, 0x66, 0x66};
+        constexpr uint8_t RoundTowardZero[] = {0xD1, 0xFA, 0x8B, 0xC2, 0xC1, 0xE8, 0x1F, 0x03, 0xD0};
+        constexpr size_t MaximumScheduledGap = 16;
+        constexpr uint8_t Nop = 0x90;
+
+        if (!FrameDeltaSeconds || !FrameTickDelta300)
+        {
+            spdlog::error("Action timer fix requires the frame delta and 300 Hz tick");
+            return false;
+        }
+
+        uint8_t* timeGetter = Memory::PatternScanRange(GameText.begin, GameText.size, TimeGetterPattern);
+        if (!timeGetter || reinterpret_cast<float*>(GetRelativeOffset(timeGetter + 23)) != FrameDeltaSeconds)
+        {
+            spdlog::error("Frame time-block getter not found");
+            return false;
+        }
+        LogAddress("frameTimeBlockGetter", reinterpret_cast<uintptr_t>(timeGetter));
+
+        const ptrdiff_t tickOffset = reinterpret_cast<uint8_t*>(FrameTickDelta300) - reinterpret_cast<uint8_t*>(FrameDeltaSeconds);
+        if (tickOffset <= 0 || tickOffset >= 0x80)
+            return false;
+
+        size_t patched = 0;
+        uint8_t* const textEnd = GameText.begin + GameText.size;
+        for (uint8_t* site = GameText.begin + 32; site + 64 < textEnd; ++site)
+        {
+            if (site[0] != DivideByFiveMagic[0] || std::memcmp(site, DivideByFiveMagic, sizeof(DivideByFiveMagic)) != 0)
+                continue;
+
+            const bool extendedRegister = site[5] == 0x41;
+            uint8_t* multiply = site + sizeof(DivideByFiveMagic) + extendedRegister;
+            if (multiply[0] != 0xF7 || (multiply[1] & 0xF8) != 0xE8)
+                continue;
+
+            const uint8_t sourceRegister = multiply[1] & 7;
+            uint8_t* const multiplyEnd = multiply + 2;
+            uint8_t* const round = std::search(multiplyEnd, multiplyEnd + MaximumScheduledGap, std::begin(RoundTowardZero), std::end(RoundTowardZero));
+            if (round == multiplyEnd + MaximumScheduledGap)
+                continue;
+
+            uint8_t* scale = nullptr;
+            for (uint8_t* candidate = round + sizeof(RoundTowardZero); candidate < round + sizeof(RoundTowardZero) + 12; ++candidate)
+            {
+                if (candidate[0] == 0x6B && (candidate[1] == 0xC2 || candidate[1] == 0xD2) && candidate[2] == 50)
+                {
+                    scale = candidate;
+                    break;
+                }
+            }
+
+            if (!scale || !LoadsFrameTicks300(site, timeGetter, sourceRegister, extendedRegister, static_cast<uint8_t>(tickOffset)))
+                continue;
+
+            std::array<uint8_t, 64> code{};
+            const size_t codeSize = static_cast<size_t>(scale + 3 - site);
+            std::memcpy(code.data(), site, codeSize);
+
+            const size_t multiplySize = static_cast<size_t>(multiplyEnd - site);
+            std::fill_n(code.begin(), multiplySize, Nop);
+            size_t length = 0;
+            if (extendedRegister)
+                code[length++] = 0x41;
+            code[length++] = 0x6B;
+            code[length++] = static_cast<uint8_t>(0xD0 | sourceRegister);
+            code[length++] = 10;
+
+            const size_t roundOffset = static_cast<size_t>(round - site);
+            code[roundOffset] = 0x66;
+            code[roundOffset + 1] = Nop;
+            code[codeSize - 1] = 1;
+
+            LogAddress("actionTimerTickConversion", reinterpret_cast<uintptr_t>(site));
+            if (!Memory::PatchCode(site, code.data(), codeSize))
+                return false;
+
+            ++patched;
+            site = scale + 2;
+        }
+
+        if (patched == 0)
+        {
+            spdlog::error("No action timer tick conversions found");
+            return false;
+        }
+
+        spdlog::info("Action timer fix applied to {} tick conversions", patched);
+        return true;
+    }
+
     bool InstallWindManagerTimingFix()
     {
         constexpr char Pattern[] = "40 53 48 81 EC 80 00 00 00 48 8B D9 E8 ?? ?? ?? ?? 8B 05 ?? ?? ?? ?? 0B 05 ?? ?? ?? ?? A9 00 00 80 10 74";
@@ -1079,6 +1197,8 @@ void MGS4_Initialize()
         spdlog::error("Failed to install the polygon-demo timing fix");
     if (!InstallMicrowaveMashTimingFix())
         spdlog::error("Failed to install the microwave mash-input timing fix");
+    if (!InstallActionTimerTimingFix())
+        spdlog::error("Failed to install the action timer fix");
     if (!InstallWindManagerTimingFix())
         spdlog::error("Failed to install the wind-manager timing fix");
     if (!InstallSpursTaskTimingFix())

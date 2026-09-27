@@ -153,6 +153,18 @@ void Memory::DetourFunction(uint64_t target, LPVOID detour, LPVOID* ppOriginal)
     MH_EnableHook((LPVOID)target);
 }
 
+bool Memory::PatchCode(void* address, const void* bytes, size_t size)
+{
+    DWORD oldProtect = 0;
+    if (!address || !bytes || !VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &oldProtect))
+        return false;
+
+    memcpy(address, bytes, size);
+    FlushInstructionCache(GetCurrentProcess(), address, size);
+    VirtualProtect(address, size, oldProtect, &oldProtect);
+    return true;
+}
+
 bool Memory::GetModuleSection(HMODULE module, const char* name, ModuleSection& result)
 {
     result = {};
