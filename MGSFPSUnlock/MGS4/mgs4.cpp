@@ -388,13 +388,13 @@ namespace
             return;
         }
 
-        const bool timelineReset = *reinterpret_cast<int32_t*>(demo + 0x44588) != 0;
+        const bool timelineReset = *reinterpret_cast<int32_t*>(demo + 0x44590) != 0;
         if (timelineReset)
             PendingPolygonDemoControlMessages = {};
 
         const bool nativeUpdate = timelineReset || IsNativeTick();
         const bool pauseMaintenanceUpdate =
-            !nativeUpdate && *reinterpret_cast<int32_t*>(demo + 0x445A0) != 0;
+            !nativeUpdate && *reinterpret_cast<int32_t*>(demo + 0x445A8) != 0;
         if (!nativeUpdate && !pauseMaintenanceUpdate)
         {
             // Actor message buffers rotate every render frame. Preserve control messages that would otherwise expire before the next update.
@@ -407,8 +407,8 @@ namespace
         int32_t savedCountdown = 0;
         if (pauseMaintenanceUpdate)
         {
-            savedCountdown = *reinterpret_cast<int32_t*>(demo + 0x445C4);
-            *reinterpret_cast<int32_t*>(demo + 0x445C4) = 0;
+            savedCountdown = *reinterpret_cast<int32_t*>(demo + 0x445D4);
+            *reinterpret_cast<int32_t*>(demo + 0x445D4) = 0;
             DeferPolygonDemoControlMessages = true;
         }
 
@@ -418,7 +418,7 @@ namespace
         DeferPolygonDemoControlMessages = previousDefer;
 
         if (pauseMaintenanceUpdate)
-            *reinterpret_cast<int32_t*>(demo + 0x445C4) = savedCountdown;
+            *reinterpret_cast<int32_t*>(demo + 0x445D4) = savedCountdown;
     }
 
     void __fastcall WindManagerUpdateHook(uint8_t* windManager)
@@ -719,21 +719,19 @@ namespace
 
     bool InstallCharacterControlTimingFix()
     {
-        constexpr char Pattern[] = "40 53 48 83 EC 20 83 3D ?? ?? ?? ?? 00 BB 01 00 00 00 75 ?? 89 1D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? E8";
+        constexpr char Pattern[] = "83 3D ?? ?? ?? ?? 00 B? 01 00 00 00 75 ?? 89 ?5 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B 0D ?? ?? ?? ?? 33 D2";
 
-        if (!FrameDeltaSeconds)
+        if (!FrameDeltaSeconds || !FrameTickDelta300)
         {
-            spdlog::error("Character timing requires the frame delta");
+            spdlog::error("Character timing requires the frame delta and 300 Hz tick");
             return false;
         }
 
-        uint8_t* frameTimeUpdate = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        uint8_t* anchor = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        uint8_t* frameTimeUpdate = Memory::GetFunctionStart(GameModule, anchor);
         if (!frameTimeUpdate)
             return false;
         LogAddress("frameTimeUpdate", reinterpret_cast<uintptr_t>(frameTimeUpdate));
-
-        FrameTickDelta300 = reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(FrameDeltaSeconds) + 0xC);
-        LogAddress("frameTickDelta300", reinterpret_cast<uintptr_t>(FrameTickDelta300));
 
         if (MH_CreateHook(frameTimeUpdate, reinterpret_cast<LPVOID>(&FrameTimeUpdateHook), reinterpret_cast<void**>(&FrameTimeUpdate)) != MH_OK)
             return false;
@@ -747,11 +745,8 @@ namespace
         constexpr char UpdatePattern[] = "44 89 4C 24 20 4C 89 44 24 18 48 89 54 24 10 89 4C 24 08 53 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 08 01 00 00 45 33 ED";
         constexpr char SequenceUpdatePattern[] = "40 53 41 57 48 83 EC 48 48 8B D9 0F 29 74 24 30 48 8B 89 F8 00 00 00 F3 0F 10 35 ?? ?? ?? ?? 48 85 C9 74 0D 8B 01 25 00 10 00 00 0F 85 ?? ?? ?? ?? 48 89 74 24 70 B9 01 00 00 00";
         constexpr char MergePattern[] = "48 8D 05 ?? ?? ?? ?? 44 8B D1 49 C1 E2 06 45 8B D8 4C 03 D0 4C 8B CA 33 C0 0F 1F 80 00 00 00 00 41 0F B6 0C 42 41 FF CB";
-        constexpr std::array<uint8_t, 3> OutputQueueLoadOpcode = {0x48, 0x8D, 0x1D};
-        constexpr std::array<uint8_t, 2> RawTickLoadOpcode = {0xF7, 0x2D};
-        constexpr std::array<uint8_t, 4> ScaledTickLoadOpcode = {0x66, 0x0F, 0x6E, 0x05};
-        constexpr ptrdiff_t RawTickLoadOffset = 0x56;
-        constexpr ptrdiff_t ScaledTickLoadOffset = 0x64;
+        constexpr char TickLoadPattern[] = "B8 67 66 66 66 74 ?? F7 2D ?? ?? ?? ?? F3 0F 11 8B F0 00 00 00 66 0F 6E 05 ?? ?? ?? ?? 0F 5B C0";
+        constexpr char OutputQueueLoadPattern[] = "48 8D 1D ?? ?? ?? ?? 4C 8B 7C 24 60 48 8B F3 BD 01 01 00 00";
 
         uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, UpdatePattern);
         uint8_t* sequenceUpdate = Memory::PatternScanRange(GameText.begin, GameText.size, SequenceUpdatePattern);
@@ -764,36 +759,19 @@ namespace
         LogAddress("gamepadVibrationSequenceUpdate", reinterpret_cast<uintptr_t>(sequenceUpdate));
         LogAddress("gamepadVibrationMerge", reinterpret_cast<uintptr_t>(merge));
 
-        if (std::memcmp(sequenceUpdate + RawTickLoadOffset, RawTickLoadOpcode.data(), RawTickLoadOpcode.size()) != 0 ||
-            std::memcmp(sequenceUpdate + ScaledTickLoadOffset, ScaledTickLoadOpcode.data(), ScaledTickLoadOpcode.size()) != 0)
+        uint8_t* tickLoads = Memory::PatternScanRange(sequenceUpdate, 0x100, TickLoadPattern);
+        uint8_t* outputQueueLoad = Memory::PatternScanRange(update, 0x800, OutputQueueLoadPattern);
+        if (!tickLoads || !outputQueueLoad)
         {
-            spdlog::error("Gamepad vibration sequence tick-load validation failed");
+            spdlog::error("Gamepad vibration tick or output-queue load not found");
             return false;
         }
 
-        int32_t rawTickDisplacement = 0;
-        int32_t scaledTickDisplacement = 0;
-        std::memcpy(&rawTickDisplacement, sequenceUpdate + 0x58, sizeof(rawTickDisplacement));
-        std::memcpy(&scaledTickDisplacement, sequenceUpdate + 0x68, sizeof(scaledTickDisplacement));
-        GamepadVibrationRawTickDelta300 = reinterpret_cast<int32_t*>(sequenceUpdate + RawTickLoadOffset + 6 + rawTickDisplacement);
-        int32_t* sequenceScaledTickDelta300 = reinterpret_cast<int32_t*>(sequenceUpdate + ScaledTickLoadOffset + 8 + scaledTickDisplacement);
+        GamepadVibrationRawTickDelta300 = reinterpret_cast<int32_t*>(GetRelativeOffset(tickLoads + 9));
+        FrameTickDelta300 = reinterpret_cast<int32_t*>(GetRelativeOffset(tickLoads + 25));
+        GamepadVibrationOutputSamples = reinterpret_cast<uint8_t*>(GetRelativeOffset(outputQueueLoad + 3));
         LogAddress("gamepadVibrationRawTickDelta300", reinterpret_cast<uintptr_t>(GamepadVibrationRawTickDelta300));
-        if (sequenceScaledTickDelta300 != FrameTickDelta300)
-        {
-            spdlog::error("Gamepad vibration scaled tick is not the known 300 Hz frame tick");
-            return false;
-        }
-
-        uint8_t* outputQueueLoad = update + 0x64F;
-        if (std::memcmp(outputQueueLoad, OutputQueueLoadOpcode.data(), OutputQueueLoadOpcode.size()) != 0)
-        {
-            spdlog::error("Gamepad vibration output-queue load validation failed");
-            return false;
-        }
-
-        int32_t outputDisplacement = 0;
-        std::memcpy(&outputDisplacement, outputQueueLoad + 3, sizeof(outputDisplacement));
-        GamepadVibrationOutputSamples = outputQueueLoad + 7 + outputDisplacement;
+        LogAddress("frameTickDelta300", reinterpret_cast<uintptr_t>(FrameTickDelta300));
         LogAddress("gamepadVibrationOutputSamples", reinterpret_cast<uintptr_t>(GamepadVibrationOutputSamples));
 
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&GamepadUpdateHook), reinterpret_cast<void**>(&GamepadUpdate)) != MH_OK)
@@ -811,23 +789,22 @@ namespace
 
     bool InstallSphericalCameraTimingFix()
     {
-        constexpr char Pattern[] = "48 89 5C 24 10 56 48 83 EC 30 48 8B D9 48 89 7C 24 40 8B 89 A8 00 00 00 33 F6 85 C9 0F 84 ?? ?? ?? ?? 83 E9 01 0F 84 ?? ?? ?? ?? 83 E9 01 74 ?? 83 F9 01 0F 85 ?? ?? ?? ?? F3 0F 10 05 ?? ?? ?? ??";
-        constexpr ptrdiff_t DeltaLoadOffset = 0x39;
-        constexpr std::array<uint8_t, 4> DeltaLoadOpcode = {0xF3, 0x0F, 0x10, 0x05};
+        constexpr char Pattern[] = "48 89 5C 24 10 56 48 83 EC 30 48 8B D9 48 89 7C 24 40 8B 89 A8 00 00 00 33 F6 85 C9 0F 84 ?? ?? ?? ?? 83 E9 01 0F 84 ?? ?? ?? ?? 83 E9 01 74 ?? 83 F9 01 0F 85 ?? ?? ?? ??";
+        constexpr char DeltaLoadPattern[] = "F3 0F 10 05 ?? ?? ?? ?? F3 0F";
 
         uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
         if (!update)
             return false;
         LogAddress("sphericalCameraUpdate", reinterpret_cast<uintptr_t>(update));
-        if (std::memcmp(update + DeltaLoadOffset, DeltaLoadOpcode.data(), DeltaLoadOpcode.size()) != 0)
+
+        uint8_t* deltaLoad = Memory::PatternScanRange(update, 0x80, DeltaLoadPattern);
+        if (!deltaLoad)
         {
-            spdlog::error("Spherical camera delta-time load validation failed");
+            spdlog::error("Spherical camera delta-time load not found");
             return false;
         }
 
-        int32_t displacement = 0;
-        std::memcpy(&displacement, update + 0x3D, sizeof(displacement));
-        FrameDeltaSeconds = reinterpret_cast<float*>(update + DeltaLoadOffset + 8 + displacement);
+        FrameDeltaSeconds = reinterpret_cast<float*>(GetRelativeOffset(deltaLoad + 4));
         LogAddress("frameDeltaSeconds", reinterpret_cast<uintptr_t>(FrameDeltaSeconds));
 
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&SphericalCameraUpdateHook), reinterpret_cast<void**>(&SphericalCameraUpdate)) != MH_OK)
@@ -842,24 +819,28 @@ namespace
 
     bool InstallPolygonDemoTimingFix()
     {
-        constexpr char Pattern[] = "48 89 5C 24 20 56 57 41 54 41 56 41 57 48 83 EC 40 48 8B 1D ?? ?? ?? ?? 4C 8D B1 90 00 00 00 33 F6 4C 8D 3D ?? ?? ?? ?? 48 8B F9 8B 89 C4 45 04 00 44 8D 66 01 8D 56 02 85 C9 7E ?? 3B 8F C0 45 04 00";
+        constexpr char Pattern[] = "48 8B 1D ?? ?? ?? ?? 4? 8D ?? 90 00 00 00 33 F6 4C 8D 3D ?? ?? ?? ?? 48 8B F9 8B 89 ?? ?? 04 00 44 8D 66 01 8D 56 02 85 C9 7E ?? 3B 8F ?? ?? 04 00";
         constexpr char ActorMessagePollPattern[] = "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 54 41 55 41 56 41 57 48 83 EC 20 4C 8B E2 8B F1 E8 ?? ?? ?? ?? 85 C0";
-        constexpr std::array<uint8_t, 3> TimeDeltaLoadOpcode = {0x4C, 0x8D, 0x3D};
+        constexpr char TimeDeltaLoadPattern[] = "4C 8D 3D ?? ?? ?? ?? 48 8B F9";
+        constexpr char TickDelta60LoadPattern[] = "41 8B 47 ?? 8D 0C 80 03 8F ?? ?? 04 00";
 
-        uint8_t* update = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        uint8_t* anchor = Memory::PatternScanRange(GameText.begin, GameText.size, Pattern);
+        uint8_t* update = Memory::GetFunctionStart(GameModule, anchor);
         uint8_t* actorMessagePoll = Memory::PatternScanRange(GameText.begin, GameText.size, ActorMessagePollPattern);
         if (!update || !actorMessagePoll)
             return false;
         LogAddress("polygonDemoUpdate", reinterpret_cast<uintptr_t>(update));
         LogAddress("actorMessagePoll", reinterpret_cast<uintptr_t>(actorMessagePoll));
-        if (std::memcmp(update + 0x21, TimeDeltaLoadOpcode.data(), TimeDeltaLoadOpcode.size()) != 0)
+
+        uint8_t* timeDeltaLoad = Memory::PatternScanRange(update, 0x80, TimeDeltaLoadPattern);
+        uint8_t* tickDelta60Load = Memory::PatternScanRange(update, 0x800, TickDelta60LoadPattern);
+        if (!timeDeltaLoad || !tickDelta60Load)
         {
-            spdlog::error("Polygon-demo time-delta load validation failed");
+            spdlog::error("Polygon-demo time-delta load not found");
             return false;
         }
 
-        uint8_t* timeDelta = reinterpret_cast<uint8_t*>(GetRelativeOffset(update + 0x24));
-        FrameTickDelta60 = reinterpret_cast<int32_t*>(timeDelta + 8);
+        FrameTickDelta60 = reinterpret_cast<int32_t*>(GetRelativeOffset(timeDeltaLoad + 3) + tickDelta60Load[3]);
         LogAddress("frameTickDelta60", reinterpret_cast<uintptr_t>(FrameTickDelta60));
 
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&PolygonDemoUpdateHook), reinterpret_cast<void**>(&PolygonDemoUpdate)) != MH_OK)
@@ -1090,10 +1071,10 @@ void MGS4_Initialize()
 
     if (!InstallSphericalCameraTimingFix())
         spdlog::error("Failed to install the spherical camera timing fix");
-    if (!InstallCharacterControlTimingFix())
-        spdlog::error("Failed to install the character control timing fix");
     if (!InstallGamepadVibrationTimingFix())
         spdlog::error("Failed to install the gamepad vibration timing fix");
+    if (!InstallCharacterControlTimingFix())
+        spdlog::error("Failed to install the character control timing fix");
     if (!InstallPolygonDemoTimingFix())
         spdlog::error("Failed to install the polygon-demo timing fix");
     if (!InstallMicrowaveMashTimingFix())

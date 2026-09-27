@@ -16,4 +16,5 @@ namespace Memory
     uintptr_t PatternScanBasic(uintptr_t beg, uintptr_t end, uint8_t* str, uintptr_t len);
     uint8_t* PatternScan(void* module, const char* signature, int skip = 0, bool end = false);
     uint8_t* PatternScanRange(void* begin, uintptr_t size, const char* signature, int skip = 0, bool end = false);
+    uint8_t* GetFunctionStart(HMODULE module, void* address);
 };
