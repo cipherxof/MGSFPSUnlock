@@ -1,3 +1,7 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "mgs4.h"
 #include "Memory.h"
 #include "MinHook.h"
@@ -11,6 +15,8 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <unordered_map>
+#include <vector>
 
 namespace
 {
@@ -27,6 +33,9 @@ namespace
     using SpursTaskTimingDelegate = uint64_t(__fastcall*)(float* taskStep, uint32_t maxSteps);
     using ClothManagerUpdateDelegate = void(__fastcall*)(uint8_t* manager, float updateArgument, int32_t updateType);
     using ClothProducerUpdateDelegate = void(__fastcall*)(uint8_t* producer, float updateArgument, int32_t updateType);
+    using ClothWorkerMainDelegate = void(__fastcall*)(uint8_t* context, uint8_t* task);
+    using ClothSolverDestroyDelegate = void(__fastcall*)(uint8_t* solver);
+    using ClothSolverDetachDelegate = void(__fastcall*)(uint8_t* producer, uint8_t* solver);
     using ClothTransformPublishDelegate = void(__fastcall*)(uint8_t* producer);
     using DirectResidentClothOwnerUpdateDelegate = void(__fastcall*)(uint8_t* owner);
     using DirectResidentClothBonePublishDelegate = void(__fastcall*)(uint8_t* cloth, uint8_t** particleBuffer);
@@ -50,6 +59,9 @@ namespace
     SpursTaskTimingDelegate SpursTaskTiming = nullptr;
     ClothManagerUpdateDelegate ClothManagerUpdate = nullptr;
     ClothProducerUpdateDelegate ClothProducerUpdate = nullptr;
+    ClothWorkerMainDelegate ClothWorkerMain = nullptr;
+    ClothSolverDestroyDelegate ClothSolverDestroy = nullptr;
+    ClothSolverDetachDelegate ClothSolverDetach = nullptr;
     ClothTransformPublishDelegate ClothTransformPublish = nullptr;
     DirectResidentClothOwnerUpdateDelegate DirectResidentClothOwnerUpdate = nullptr;
     DirectResidentClothBonePublishDelegate DirectResidentClothBonePublish = nullptr;
@@ -475,6 +487,322 @@ namespace
         ActiveClothManagerTiming = previousTiming;
     }
 
+    using ClothMatrix = std::array<float, 16>;
+    struct StripBinding
+    {
+        int16_t anchor, secondary, tip, pointIndices[2];
+        int16_t padding[3];
+    };
+    static_assert(sizeof(StripBinding) == 16);
+
+    struct StripBonePose
+    {
+        StripBinding binding{};
+        ClothMatrix anchor{}, input{}, solved{}, output{};
+        bool valid = false, write = false;
+    };
+
+    struct StripPose
+    {
+        const uint8_t* producer = nullptr;
+        const ClothMatrix* palette = nullptr;
+        const StripBinding* bindings = nullptr;
+        const void* skeleton = nullptr;
+        int jointCount = 0;
+        float blend = 0;
+        uint64_t capture = 0, frame = 0;
+        std::vector<StripBonePose> bones;
+    };
+
+    std::mutex StripPoseMutex;
+    std::unordered_map<const uint8_t*, StripPose> StripPoses;
+    struct StripJob
+    {
+        uint64_t capture = 0;
+        uint16_t phase = 0;
+        std::vector<uint8_t*> solvers;
+    };
+    std::unordered_map<const uint8_t*, StripJob> PendingStripJobs;
+    std::atomic<uint64_t> NextStripCapture{1};
+    bool StripPoseReplayEnabled = false;
+
+    // MGS4 uses row-vector affine transforms. Express each solved row in the
+    // previous anchor basis, then apply today's anchor (including its scale).
+    bool RebaseStripPose(const ClothMatrix& solved, const ClothMatrix& previous,
+                         const ClothMatrix& current, ClothMatrix& output)
+    {
+        if (current == previous)
+        {
+            output = solved;
+            return true;
+        }
+        double inverse[3][3];
+        for (int i = 0; i < 3; ++i)
+        {
+            const int a = (i + 1) % 3, b = (i + 2) % 3;
+            for (int j = 0; j < 3; ++j)
+            {
+                const int c = (j + 1) % 3, d = (j + 2) % 3;
+                inverse[j][i] = double(previous[4*a+c]) * previous[4*b+d] -
+                                double(previous[4*a+d]) * previous[4*b+c];
+            }
+        }
+        const double det = previous[0]*inverse[0][0] + previous[1]*inverse[1][0] + previous[2]*inverse[2][0];
+        if (!std::isfinite(det) || std::abs(det) < 1e-12)
+            return false;
+        for (int row = 0; row < 4; ++row)
+        {
+            double local[3]{};
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j)
+                    local[i] += (double(solved[row*4+j]) - (row == 3 ? previous[12+j] : 0.0)) * inverse[j][i] / det;
+            for (int i = 0; i < 3; ++i)
+            {
+                output[row*4+i] = static_cast<float>(local[0]*current[i] + local[1]*current[4+i] +
+                                                     local[2]*current[8+i] + (row == 3 ? current[12+i] : 0.0));
+                if (!std::isfinite(output[row*4+i]))
+                    return false;
+            }
+            output[row*4+3] = solved[row*4+3];
+        }
+        return true;
+    }
+
+    enum class StripPass { Observe, Begin, Complete, Prepare, Publish };
+
+    bool HasStripConflict(const StripPose& pose, const StripBonePose& bone, uint64_t frame)
+    {
+        for (const auto& entry : StripPoses)
+        {
+            const auto& other = entry.second;
+            if (other.palette != pose.palette || frame - other.frame > 1)
+                continue;
+            for (const auto& row : other.bones)
+            {
+                if (&row != &bone && row.valid && (row.binding.tip == bone.binding.tip ||
+                    row.binding.tip == bone.binding.anchor || row.binding.anchor == bone.binding.tip))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    bool MatchesStripInput(const ClothMatrix& actual, const ClothMatrix& expected)
+    {
+        for (int i = 0; i < 16; ++i)
+            if (!(std::abs(actual[i] - expected[i]) <= 0.00001f + 0.000002f * std::abs(expected[i])))
+                return false;
+        return true;
+    }
+
+    void VisitStripPose(uint8_t* producer, uint8_t* solver, StripPass pass, uint64_t capture, uint64_t frame)
+    {
+        auto found = StripPoses.find(solver);
+        if (pass == StripPass::Complete || pass == StripPass::Prepare || pass == StripPass::Publish)
+        {
+            if (found == StripPoses.end() || found->second.capture != capture)
+                return; // Deleted, pending, or superseded while the native callback ran.
+        }
+        if (!solver || *reinterpret_cast<uint8_t**>(solver + 0x240) != producer)
+            return;
+        auto* palette = *reinterpret_cast<ClothMatrix**>(solver + 0x190);
+        const auto* bindings = *reinterpret_cast<StripBinding**>(solver + 0x1D0);
+        const auto* skeleton = *reinterpret_cast<void**>(solver + 0x198);
+        const int count = *reinterpret_cast<int32_t*>(solver + 0x1C8);
+        const int joints = *reinterpret_cast<int32_t*>(solver + 0x188);
+        const float blend = *reinterpret_cast<float*>(solver + 0x214);
+        if (!palette || !bindings || count <= 0 || count > 4096 || joints <= 0 || joints > 0x8000)
+        {
+            // A solver with no publishable bones can precede another live solver
+            // in the job's DMA chain. Retain only its enrollment until completion.
+            if (pass == StripPass::Begin || pass == StripPass::Observe)
+            {
+                auto& pose = StripPoses[solver];
+                pose.producer = producer;
+                pose.capture = capture;
+                pose.frame = frame;
+                pose.bones.clear();
+            }
+            else
+                StripPoses.erase(solver);
+            return;
+        }
+
+        if (pass == StripPass::Begin || pass == StripPass::Observe)
+        {
+            auto& pose = StripPoses[solver];
+            pose.producer = producer;
+            pose.palette = palette;
+            pose.bindings = bindings;
+            pose.skeleton = skeleton;
+            pose.jointCount = joints;
+            pose.blend = blend;
+            pose.capture = capture;
+            pose.frame = frame;
+            pose.bones.resize(count);
+            for (int i = 0; i < count; ++i)
+            {
+                auto& bone = pose.bones[i];
+                bone.binding = bindings[i];
+                const auto& b = bone.binding;
+                bone.valid = b.anchor >= 0 && b.anchor < joints && b.tip >= 0 && b.tip < joints;
+                if (bone.valid && pass == StripPass::Begin)
+                {
+                    bone.anchor = palette[b.anchor];
+                    bone.input = palette[b.tip];
+                }
+            }
+            return;
+        }
+        if (found == StripPoses.end())
+            return;
+        auto& pose = found->second;
+        if (pose.producer != producer || pose.palette != palette || pose.bindings != bindings ||
+            pose.skeleton != skeleton || pose.jointCount != joints || pose.blend != blend ||
+            pose.bones.size() != static_cast<size_t>(count))
+        {
+            StripPoses.erase(found);
+            return;
+        }
+        if (pass == StripPass::Complete)
+        {
+            pose.capture = 0;
+        }
+        else if (pose.capture || frame - pose.frame > 1)
+            return;
+        pose.frame = frame;
+        for (int i = 0; i < count; ++i)
+        {
+            auto& bone = pose.bones[i];
+            const auto& b = bindings[i];
+            // Only the first five words are initialized in the native binding.
+            if (!bone.valid || std::memcmp(&bone.binding, &b, offsetof(StripBinding, padding)) != 0)
+            {
+                bone.valid = false;
+                continue;
+            }
+            switch (pass)
+            {
+            case StripPass::Complete:
+                bone.solved = palette[b.tip];
+                bone.output = bone.solved;
+                bone.valid = std::all_of(bone.solved.begin(), bone.solved.end(), [](float v) { return std::isfinite(v); });
+                break;
+            case StripPass::Prepare:
+            {
+                // Restore an animated reset or move our held output with its anchor.
+                // A different writer's pose and ambiguous shared joints stay native.
+                bone.write = false;
+                const auto& current = palette[b.tip];
+                const auto& anchor = palette[b.anchor];
+                if (current == bone.solved && anchor == bone.anchor)
+                    break;
+                if (HasStripConflict(pose, bone, frame))
+                    break;
+                ClothMatrix base;
+                if (current != bone.solved && current != bone.output &&
+                    (!RebaseStripPose(bone.input, bone.anchor, anchor, base) || !MatchesStripInput(current, base)))
+                    break;
+                ClothMatrix output;
+                if (RebaseStripPose(bone.solved, bone.anchor, anchor, output) && current != output)
+                {
+                    bone.output = output;
+                    bone.write = true;
+                }
+                break;
+            }
+            case StripPass::Publish:
+                if (bone.write)
+                    palette[b.tip] = bone.output;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+
+    void VisitStripProducer(uint8_t* producer, StripPass pass, uint64_t capture = 0)
+    {
+        const auto frame = RenderFrameSerial.load(std::memory_order_relaxed);
+        const auto view = GetClothObjectList(producer, 0x08);
+        if (!view.first)
+            return;
+        const auto* list = *reinterpret_cast<uint8_t**>(producer + 0x08);
+        auto** solvers = *reinterpret_cast<uint8_t** const*>(list + 0x10);
+        for (uint32_t i = 0; i < view.count; ++i)
+            VisitStripPose(producer, solvers[i], pass, capture, frame);
+    }
+
+    void __fastcall ClothWorkerMainHook(uint8_t* context, uint8_t* task)
+    {
+        // Other callers submit this worker with a different host layout. Only the
+        // producer hook can enroll a job; an unrecognized job passes straight through.
+        if (!StripPoseReplayEnabled || Config.targetFramerate <= ReferenceFps)
+        {
+            ClothWorkerMain(context, task);
+            return;
+        }
+        auto* host = *reinterpret_cast<uint8_t**>(context + 0x18);
+        StripJob job;
+        uint8_t* producer = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(StripPoseMutex);
+            auto pending = PendingStripJobs.find(host);
+            if (pending != PendingStripJobs.end() &&
+                *reinterpret_cast<uint8_t**>(task + 0x48) == host + 0x130 &&
+                pending->second.phase == *reinterpret_cast<uint16_t*>(task + 0x84))
+            {
+                job = std::move(pending->second);
+                PendingStripJobs.erase(pending);
+                producer = host - 0x30;
+                auto* solver = *reinterpret_cast<uint8_t**>(producer + 0x168);
+                const int count = *reinterpret_cast<uint16_t*>(task + 0x9E);
+                const auto frame = RenderFrameSerial.load(std::memory_order_relaxed);
+                for (int i = 0; solver && i < count && count <= 4096; ++i)
+                {
+                    auto found = StripPoses.find(solver);
+                    if (found == StripPoses.end() || found->second.capture != job.capture)
+                        break;
+                    // Only follow the current job's registered host DMA chain.
+                    VisitStripPose(producer, solver, StripPass::Begin, job.capture, frame);
+                    job.solvers.push_back(solver);
+                    solver = *reinterpret_cast<uint8_t**>(solver + 0x18);
+                }
+            }
+        }
+        ClothWorkerMain(context, task);
+        if (!job.solvers.empty())
+        {
+            std::lock_guard<std::mutex> lock(StripPoseMutex);
+            const auto frame = RenderFrameSerial.load(std::memory_order_relaxed);
+            for (auto* key : job.solvers)
+                VisitStripPose(producer, key, StripPass::Complete, job.capture, frame);
+        }
+    }
+
+    void ForgetStripPose(uint8_t* solver)
+    {
+        std::lock_guard<std::mutex> lock(StripPoseMutex);
+        auto found = StripPoses.find(solver);
+        if (found != StripPoses.end())
+        {
+            PendingStripJobs.erase(found->second.producer + 0x30);
+            StripPoses.erase(found);
+        }
+    }
+
+    void __fastcall ClothSolverDetachHook(uint8_t* producer, uint8_t* solver)
+    {
+        ForgetStripPose(solver);
+        ClothSolverDetach(producer, solver);
+    }
+
+    void __fastcall ClothSolverDestroyHook(uint8_t* solver)
+    {
+        ForgetStripPose(solver);
+        ClothSolverDestroy(solver);
+    }
+
     void __fastcall ClothProducerUpdateHook(uint8_t* producer, float updateArgument, int32_t updateType)
     {
         const bool nativeTick = IsNativeTick();
@@ -492,12 +820,45 @@ namespace
             const bool previousManagerPerRenderTiming = ActiveManagerStripPerRenderTiming;
             ActiveClothProducerTiming = !usePerRenderDelta;
             ActiveManagerStripPerRenderTiming = managerBackedHair;
+            // Synchronous producers publish inside the original call. Queued
+            // producers publish on the worker, potentially after this call returns.
+            const bool trackPose = StripPoseReplayEnabled && producer && Config.targetFramerate > ReferenceFps;
+            const bool capturePose = trackPose && objects.count && !usePerRenderDelta;
+            const bool queued = capturePose && producer[0x18];
+            const auto capture = trackPose ? NextStripCapture.fetch_add(1, std::memory_order_relaxed) : 0;
+            if (trackPose)
+            {
+                std::lock_guard<std::mutex> lock(StripPoseMutex);
+                if (queued)
+                {
+                    VisitStripProducer(producer, StripPass::Observe, capture);
+                    PendingStripJobs[producer + 0x30] = {capture, static_cast<uint16_t>(producer[0x14] ^ 1)};
+                }
+                else
+                {
+                    PendingStripJobs.erase(producer + 0x30);
+                    // Per-render solvers may own a tip on the same palette. Only
+                    // record their claims; they already publish at native cadence.
+                    VisitStripProducer(producer, capturePose ? StripPass::Begin : StripPass::Observe, capture);
+                }
+            }
             ClothProducerUpdate(producer, updateArgument, updateType);
+            if (capturePose && !queued)
+            {
+                std::lock_guard<std::mutex> lock(StripPoseMutex);
+                VisitStripProducer(producer, StripPass::Complete, capture);
+            }
             ActiveManagerStripPerRenderTiming = previousManagerPerRenderTiming;
             ActiveClothProducerTiming = previousTiming;
         }
         else if (producer && ClothTransformPublish)
         {
+            if (StripPoseReplayEnabled)
+            {
+                std::lock_guard<std::mutex> lock(StripPoseMutex);
+                VisitStripProducer(producer, StripPass::Prepare);
+                VisitStripProducer(producer, StripPass::Publish);
+            }
             ClothTransformPublish(producer);
         }
     }
@@ -1043,6 +1404,9 @@ namespace
     {
         constexpr char ProducerPattern[] = "48 89 5C 24 18 55 57 41 56 48 81 EC 10 01 00 00 48 8B B9 70 03 00 00 45 33 F6 41 8B E8 48 8B D9 48 8B 07 44 89 70 04 44 39 30 74 3D";
         constexpr char PublishPattern[] = "48 8B 41 08 4C 8B D1 83 38 00 C7 40 04 00 00 00 00 74 5C 49 8B 42 08 4C 63 40 04 44 3B 00 7D 4F";
+        constexpr char WorkerPattern[] = "48 8B C4 55 41 54 48 8D A8 58 FC FF FF 48 81 EC 98 04 00 00 48 89 58 08 0F 57 C0 48 89 70 E8";
+        constexpr char DestroyPattern[] = "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 8B 91 A8 01 00 00 8B 81 A0 01 00 00 44 8D 04 50 33 FF";
+        constexpr char DetachPattern[] = "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B B9 70 03 00 00 48 8B F2";
 
         uint8_t* publisher = Memory::PatternScanRange(GameText.begin, GameText.size, PublishPattern);
         if (!publisher)
@@ -1057,8 +1421,32 @@ namespace
 
         if (MH_CreateHook(update, reinterpret_cast<LPVOID>(&ClothProducerUpdateHook), reinterpret_cast<void**>(&ClothProducerUpdate)) != MH_OK)
             return false;
-
         spdlog::info("Installed strip-cloth producer timing fix");
+
+        uint8_t* worker = Memory::PatternScanRange(GameText.begin, GameText.size, WorkerPattern);
+        uint8_t* destroy = Memory::PatternScanRange(GameText.begin, GameText.size, DestroyPattern);
+        uint8_t* detach = Memory::PatternScanRange(GameText.begin, GameText.size, DetachPattern);
+        if (worker && destroy && detach)
+        {
+            LogAddress("clothWorkerMain", reinterpret_cast<uintptr_t>(worker));
+            LogAddress("clothSolverDestroy", reinterpret_cast<uintptr_t>(destroy));
+            LogAddress("clothSolverDetach", reinterpret_cast<uintptr_t>(detach));
+            if (MH_CreateHook(worker, reinterpret_cast<LPVOID>(&ClothWorkerMainHook), reinterpret_cast<void**>(&ClothWorkerMain)) == MH_OK)
+            {
+                if (MH_CreateHook(destroy, reinterpret_cast<LPVOID>(&ClothSolverDestroyHook), reinterpret_cast<void**>(&ClothSolverDestroy)) == MH_OK)
+                {
+                    if (MH_CreateHook(detach, reinterpret_cast<LPVOID>(&ClothSolverDetachHook), reinterpret_cast<void**>(&ClothSolverDetach)) == MH_OK)
+                    {
+                        StripPoseReplayEnabled = true;
+                        spdlog::info("Installed strip-cloth skipped-frame pose publication");
+                        return true;
+                    }
+                    MH_RemoveHook(destroy);
+                }
+                MH_RemoveHook(worker);
+            }
+        }
+        spdlog::warn("Strip-cloth skipped-frame pose publication unavailable");
         return true;
     }
 
